@@ -81,7 +81,11 @@ impl Toolchain for ClangToolchain {
         super::prepare::create_tasks(command, args)
     }
 
-    fn preprocess_step(&self, state: &SharedState, task: &CompilationTask) -> Result<PreprocessResult, Error> {
+    fn preprocess_step(&self,
+                       state: &SharedState,
+                       task: &CompilationTask,
+                       worker: &Fn(PreprocessResult) -> Result<(), Error>)
+                       -> Result<(), Error> {
         let mut args = Vec::new();
         args.push("-E".to_string());
         args.push("-x".to_string());
@@ -121,10 +125,11 @@ impl Toolchain for ClangToolchain {
         args.push("-".to_string());
 
         state.wrap_slow(|| execute(task.shared.command.to_command().args(&args)))
+            .and_then(|r| worker(r))
     }
 
     // Compile preprocessed file.
-    fn compile_prepare_step(&self, task: CompilationTask, preprocessed: MemStream) -> Result<CompileStep, Error> {
+    fn compile_prepare_step(&self, task: &CompilationTask, preprocessed: MemStream) -> Result<CompileStep, Error> {
         let mut args = Vec::new();
         args.push("-x".to_string());
         args.push(task.language.clone());

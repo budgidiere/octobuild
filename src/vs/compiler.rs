@@ -125,7 +125,11 @@ impl Toolchain for VsToolchain {
         super::prepare::create_tasks(command, args)
     }
 
-    fn preprocess_step(&self, state: &SharedState, task: &CompilationTask) -> Result<PreprocessResult, Error> {
+    fn preprocess_step(&self,
+                       state: &SharedState,
+                       task: &CompilationTask,
+                       worker: &Fn(PreprocessResult) -> Result<(), Error>)
+                       -> Result<(), Error> {
         // Make parameters list for preprocessing.
         let mut args = filter(&task.shared.args, |arg: &Arg| -> Option<String> {
             match arg {
@@ -159,7 +163,7 @@ impl Toolchain for VsToolchain {
         command.args(&args)
             .arg(&join_flag("/Fo", &task.output_object)); // /Fo option also set output path for #import directive
         let output = try!(state.wrap_slow(|| command.output()));
-        if output.status.success() {
+        let preprocess_result = if output.status.success() {
             let mut content = MemStream::new();
             if task.shared.input_precompiled.is_some() || task.shared.output_precompiled.is_some() {
                 try!(postprocess::filter_preprocessed(&mut Cursor::new(output.stdout),
@@ -169,18 +173,19 @@ impl Toolchain for VsToolchain {
             } else {
                 try!(content.write(&output.stdout));
             };
-            Ok(PreprocessResult::Success(content))
+            PreprocessResult::Success(content)
         } else {
-            Ok(PreprocessResult::Failed(OutputInfo {
+            PreprocessResult::Failed(OutputInfo {
                 status: output.status.code(),
                 stdout: Vec::new(),
                 stderr: output.stderr,
-            }))
-        }
+            })
+        };
+        worker(preprocess_result)
     }
 
     // Compile preprocessed file.
-    fn compile_prepare_step(&self, task: CompilationTask, preprocessed: MemStream) -> Result<CompileStep, Error> {
+    fn compile_prepare_step(&self, task: &CompilationTask, preprocessed: MemStream) -> Result<CompileStep, Error> {
         let mut args = filter(&task.shared.args, |arg: &Arg| -> Option<String> {
             match arg {
                 &Arg::Flag { ref scope, ref flag } => {

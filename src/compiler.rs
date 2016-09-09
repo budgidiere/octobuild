@@ -165,7 +165,8 @@ pub struct CompilerGroup(Vec<Box<Compiler>>);
 impl SharedState {
     pub fn new(config: &Config) -> Self {
         SharedState {
-            semaphore: Semaphore::new("octobuild-worker", max(config.process_limit, 1 as usize)).unwrap(), /* todo: Remove unwrap() */
+            semaphore: Semaphore::new("octobuild-worker", max(config.process_limit, 1 as usize))
+                .expect("Can't create semaphore for limit CPU usage"),
             statistic: Statistic::new(),
             cache: Cache::new(&config),
         }
@@ -388,10 +389,10 @@ pub struct CompileStep {
 }
 
 impl CompileStep {
-    pub fn new(task: CompilationTask, preprocessed: MemStream, args: Vec<String>, use_precompiled: bool) -> Self {
+    pub fn new(task: &CompilationTask, preprocessed: MemStream, args: Vec<String>, use_precompiled: bool) -> Self {
         assert!(use_precompiled || task.shared.input_precompiled.is_none());
         CompileStep {
-            output_object: Some(task.output_object),
+            output_object: Some(task.output_object.clone()),
             output_precompiled: task.shared.output_precompiled.clone(),
             input_precompiled: match use_precompiled {
                 true => task.shared.input_precompiled.clone(),
@@ -415,9 +416,13 @@ pub trait Toolchain: Send + Sync {
     // Parse compiler arguments.
     fn create_tasks(&self, command: CommandInfo, args: &[String]) -> Result<Vec<CompilationTask>, String>;
     // Preprocessing source file.
-    fn preprocess_step(&self, state: &SharedState, task: &CompilationTask) -> Result<PreprocessResult, Error>;
+    fn preprocess_step(&self,
+                       state: &SharedState,
+                       task: &CompilationTask,
+                       worker: &Fn(PreprocessResult) -> Result<(), Error>)
+                       -> Result<(), Error>;
     // Compile preprocessed file.
-    fn compile_prepare_step(&self, task: CompilationTask, preprocessed: MemStream) -> Result<CompileStep, Error>;
+    fn compile_prepare_step(&self, task: &CompilationTask, preprocessed: MemStream) -> Result<CompileStep, Error>;
 
     // Compile preprocessed file.
     fn compile_step(&self, state: &SharedState, task: CompileStep) -> Result<OutputInfo, Error>;
@@ -435,13 +440,22 @@ pub trait Toolchain: Send + Sync {
             })
     }
 
-    fn compile_task(&self, state: &SharedState, task: CompilationTask) -> Result<OutputInfo, Error> {
-        self.preprocess_step(state, &task).and_then(|preprocessed| match preprocessed {
-            PreprocessResult::Success(preprocessed) => {
-                self.compile_prepare_step(task, preprocessed)
-                    .and_then(|task| self.compile_step_cached(state, task))
-            }
-            PreprocessResult::Failed(output) => Ok(output),
+    fn compile_task(&self,
+                    state: &SharedState,
+                    task: &CompilationTask,
+                    worker: &Fn(OutputInfo) -> Result<(), Error>)
+                    -> Result<(), Error> {
+        self.preprocess_step(state,
+                             task,
+                             &|preprocessed| {
+            match preprocessed {
+                    PreprocessResult::Success(preprocessed) => {
+                        self.compile_prepare_step(task, preprocessed)
+                            .and_then(|task| self.compile_step_cached(state, task))
+                    }
+                    PreprocessResult::Failed(output) => Ok(output),
+                }
+                .and_then(|output| worker(output))
         })
     }
 

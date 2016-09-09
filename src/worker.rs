@@ -260,7 +260,16 @@ fn execute_compiler(state: &SharedState, task: &BuildTask) -> Result<OutputInfo,
         &BuildAction::Exec(ref command, ref args) => {
             state.wrap_slow(|| command.to_command().args(args).output().map(|o| OutputInfo::new(o)))
         }
-        &BuildAction::Compilation(ref toolchain, ref task) => toolchain.compile_task(state, task.clone()),
+        &BuildAction::Compilation(ref toolchain, ref task) => {
+            let output = Mutex::new(Vec::new());
+            toolchain.compile_task(state,
+                              &task,
+                              &|o| -> Result<(), Error> {
+                                  output.lock().unwrap().push(o);
+                                  Ok(())
+                              })
+                .map(|_| output.lock().unwrap().remove(0))
+        }
     }
 }
 
