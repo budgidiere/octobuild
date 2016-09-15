@@ -11,13 +11,12 @@ use ::cache::FileHasher;
 use ::io::memstream::MemStream;
 use ::cluster::common::{BuilderInfo, RPC_BUILDER_LIST, RPC_BUILDER_TASK, RPC_BUILDER_UPLOAD};
 use ::cluster::builder::{CompileRequest, CompileResponse};
-use ::compiler::{CommandInfo, CompilationTask, CompileStep, Compiler, OutputInfo, PreprocessResult, SharedState,
-                 Toolchain};
+use ::compiler::*;
 
 use std::fs;
 use std::fs::File;
 use std::io::{BufReader, Error, ErrorKind, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::net::SocketAddr;
@@ -244,14 +243,18 @@ impl Toolchain for RemoteToolchain {
     fn preprocess_step(&self,
                        state: &SharedState,
                        task: &CompilationTask,
-                       worker: &Fn(PreprocessResult) -> Result<(), Error>)
+                       worker: &Fn(&Path, PreprocessResult) -> Result<(), Error>)
                        -> Result<(), Error> {
         self.local.preprocess_step(state, task, worker)
     }
 
     // Compile preprocessed file.
-    fn compile_prepare_step(&self, task: &CompilationTask, preprocessed: MemStream) -> Result<CompileStep, Error> {
-        self.local.compile_prepare_step(task, preprocessed)
+    fn compile_prepare_step(&self,
+                            task: &CompilationTask,
+                            input_source: &Path,
+                            preprocessed: MemStream)
+                            -> Result<CompileStep, Error> {
+        self.local.compile_prepare_step(task, input_source, preprocessed)
     }
 
     fn compile_step(&self, state: &SharedState, task: CompileStep) -> Result<OutputInfo, Error> {

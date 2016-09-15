@@ -4,16 +4,16 @@ extern crate winreg;
 
 use tempdir::TempDir;
 
-pub use super::super::compiler::*;
+pub use ::compiler::*;
 
-use super::postprocess;
-use super::super::utils::filter;
-use super::super::io::memstream::MemStream;
-use super::super::io::tempfile::TempFile;
-use super::super::lazy::Lazy;
+use ::vs::postprocess;
+use ::utils::filter;
+use ::io::memstream::MemStream;
+use ::io::tempfile::TempFile;
+use ::lazy::Lazy;
 
 use std::fs::File;
-use std::io::{Cursor, Error, Read, Write};
+use std::io::{Cursor, Error, ErrorKind, Read, Write};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -128,7 +128,7 @@ impl Toolchain for VsToolchain {
     fn preprocess_step(&self,
                        state: &SharedState,
                        task: &CompilationTask,
-                       worker: &Fn(PreprocessResult) -> Result<(), Error>)
+                       worker: &Fn(&Path, PreprocessResult) -> Result<(), Error>)
                        -> Result<(), Error> {
         for input_source in task.input_sources.iter() {
             // Make parameters list for preprocessing.
@@ -182,13 +182,17 @@ impl Toolchain for VsToolchain {
                     stderr: output.stderr,
                 })
             };
-            try!(worker(preprocess_result));
+            try!(worker(input_source, preprocess_result));
         }
         Ok(())
     }
 
     // Compile preprocessed file.
-    fn compile_prepare_step(&self, task: &CompilationTask, preprocessed: MemStream) -> Result<CompileStep, Error> {
+    fn compile_prepare_step(&self,
+                            task: &CompilationTask,
+                            input_source: &Path,
+                            preprocessed: MemStream)
+                            -> Result<CompileStep, Error> {
         let mut args = filter(&task.shared.args, |arg: &Arg| -> Option<String> {
             match arg {
                 &Arg::Flag { ref scope, ref flag } => {
@@ -220,7 +224,8 @@ impl Toolchain for VsToolchain {
         if task.shared.output_precompiled.is_some() {
             args.push("/Yc".to_string());
         }
-        Ok(CompileStep::new(task, preprocessed, args, true))
+        let output_object = try!(get_output_object(input_source, &task.output_object));
+        Ok(CompileStep::new(task, Some(output_object), preprocessed, args, true))
     }
 
     fn compile_step(&self, state: &SharedState, task: CompileStep) -> Result<OutputInfo, Error> {
@@ -290,6 +295,21 @@ impl Toolchain for VsToolchain {
                     f.read_to_end(&mut buffer).map(|_| (output, buffer))
                 })
             })
+    }
+}
+
+fn get_output_object(input_source: &Path, output_object: &Path) -> Result<PathBuf, Error> {
+    match output_object.is_dir() {
+        true => {
+            input_source.file_name()
+                .map(|name| output_object.join(name).with_extension("obj"))
+                .ok_or_else(|| {
+                    Error::new(ErrorKind::InvalidInput,
+                               format!("Input file path does not contains file name: {}",
+                                       input_source.to_string_lossy()))
+                })
+        }
+        false => Ok(output_object.to_path_buf()),
     }
 }
 

@@ -389,10 +389,16 @@ pub struct CompileStep {
 }
 
 impl CompileStep {
-    pub fn new(task: &CompilationTask, preprocessed: MemStream, args: Vec<String>, use_precompiled: bool) -> Self {
+    pub fn new(task: &CompilationTask,
+               output_object: Option<PathBuf>,
+               preprocessed: MemStream,
+               args: Vec<String>,
+               use_precompiled: bool)
+               -> Self {
         assert!(use_precompiled || task.shared.input_precompiled.is_none());
+        assert!(output_object.as_ref().map(|path| !path.is_dir()).unwrap_or(true));
         CompileStep {
-            output_object: Some(task.output_object.clone()),
+            output_object: output_object,
             output_precompiled: task.shared.output_precompiled.clone(),
             input_precompiled: match use_precompiled {
                 true => task.shared.input_precompiled.clone(),
@@ -419,10 +425,14 @@ pub trait Toolchain: Send + Sync {
     fn preprocess_step(&self,
                        state: &SharedState,
                        task: &CompilationTask,
-                       worker: &Fn(PreprocessResult) -> Result<(), Error>)
+                       worker: &Fn(&Path, PreprocessResult) -> Result<(), Error>)
                        -> Result<(), Error>;
     // Compile preprocessed file.
-    fn compile_prepare_step(&self, task: &CompilationTask, preprocessed: MemStream) -> Result<CompileStep, Error>;
+    fn compile_prepare_step(&self,
+                            task: &CompilationTask,
+                            input_source: &Path,
+                            preprocessed: MemStream)
+                            -> Result<CompileStep, Error>;
 
     // Compile preprocessed file.
     fn compile_step(&self, state: &SharedState, task: CompileStep) -> Result<OutputInfo, Error>;
@@ -447,10 +457,10 @@ pub trait Toolchain: Send + Sync {
                     -> Result<(), Error> {
         self.preprocess_step(state,
                              task,
-                             &|preprocessed| {
+                             &|input_source: &Path, preprocessed: PreprocessResult| -> Result<(), Error> {
             match preprocessed {
                     PreprocessResult::Success(preprocessed) => {
-                        self.compile_prepare_step(task, preprocessed)
+                        self.compile_prepare_step(task, input_source, preprocessed)
                             .and_then(|task| self.compile_step_cached(state, task))
                     }
                     PreprocessResult::Failed(output) => Ok(output),

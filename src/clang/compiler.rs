@@ -1,8 +1,8 @@
-pub use super::super::compiler::*;
+pub use ::compiler::*;
 
-use super::super::filter::comments::CommentsRemover;
-use super::super::io::memstream::MemStream;
-use super::super::lazy::Lazy;
+use ::filter::comments::CommentsRemover;
+use ::io::memstream::MemStream;
+use ::lazy::Lazy;
 
 use regex;
 use regex::Regex;
@@ -84,7 +84,7 @@ impl Toolchain for ClangToolchain {
     fn preprocess_step(&self,
                        state: &SharedState,
                        task: &CompilationTask,
-                       worker: &Fn(PreprocessResult) -> Result<(), Error>)
+                       worker: &Fn(&Path, PreprocessResult) -> Result<(), Error>)
                        -> Result<(), Error> {
         let mut args = Vec::new();
         args.push("-E".to_string());
@@ -126,11 +126,15 @@ impl Toolchain for ClangToolchain {
         args.push("-".to_string());
 
         state.wrap_slow(|| execute(task.shared.command.to_command().args(&args)))
-            .and_then(|r| worker(r))
+            .and_then(|r| worker(&task.output_object, r))
     }
 
     // Compile preprocessed file.
-    fn compile_prepare_step(&self, task: &CompilationTask, preprocessed: MemStream) -> Result<CompileStep, Error> {
+    fn compile_prepare_step(&self,
+                            task: &CompilationTask,
+                            _: &Path,
+                            preprocessed: MemStream)
+                            -> Result<CompileStep, Error> {
         let mut args = Vec::new();
         args.push("-x".to_string());
         args.push(task.language.clone());
@@ -159,7 +163,11 @@ impl Toolchain for ClangToolchain {
                 &Arg::Output { .. } => {}
             };
         }
-        Ok(CompileStep::new(task, preprocessed, args, false))
+        Ok(CompileStep::new(task,
+                            Some(task.output_object.clone()),
+                            preprocessed,
+                            args,
+                            false))
     }
 
     fn compile_step(&self, state: &SharedState, task: CompileStep) -> Result<OutputInfo, Error> {
