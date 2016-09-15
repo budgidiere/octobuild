@@ -1,5 +1,6 @@
 use local_encoding::{Encoder, Encoding};
 
+use std::collections::HashMap;
 use std::iter::FromIterator;
 use std::ascii::AsciiExt;
 use std::fs::File;
@@ -50,7 +51,6 @@ pub fn create_tasks(command: CommandInfo, args: &[String]) -> Result<Vec<Compila
                     return Err(format!("Found too many precompiled header files: {:?}", v));
                 }
             };
-            let cwd = command.current_dir.clone();
             // Precompiled header file name.
             let marker_precompiled;
             let input_precompiled;
@@ -107,7 +107,7 @@ pub fn create_tasks(command: CommandInfo, args: &[String]) -> Result<Vec<Compila
                         return Err(format!("Found too many output object files: {:?}", v));
                     }
                 }
-                .map(|path| cwd.as_ref().map(|cwd| cwd.join(&path)).unwrap_or(path));
+                .map(|path| get_full_path(&command.current_dir, &path));
             // Language
             let language: Option<String> = match find_param(&parsed_args, |arg: &Arg| -> Option<String> {
                 match arg {
@@ -128,12 +128,12 @@ pub fn create_tasks(command: CommandInfo, args: &[String]) -> Result<Vec<Compila
                 marker_precompiled: marker_precompiled,
                 command: command,
             });
-            input_sources.into_iter()
-                .map(|source| {
-                    let input_source = cwd.as_ref().map(|cwd| cwd.join(&source)).unwrap_or(source);
-                    Ok(CompilationTask {
-                        shared: shared.clone(),
-                        language: try!(language.as_ref()
+            // Group source file by language
+            let sources: HashMap<String, Vec<PathBuf>> = try!(input_sources.iter()
+                .fold(Ok(HashMap::new()),
+                      |result, ref input_source| -> Result<HashMap<String, Vec<PathBuf>>, String> {
+                    result.and_then(|mut map| {
+                        let language = try!(language.as_ref()
                             .map_or_else(|| {
                                 input_source.extension()
                                     .and_then(|ext| match ext.to_str() {
@@ -147,28 +147,31 @@ pub fn create_tasks(command: CommandInfo, args: &[String]) -> Result<Vec<Compila
                             .ok_or_else(|| {
                                 format!("Can't detect file language by extension: {}",
                                         input_source.to_string_lossy())
-                            })),
-                        output_object: try!(get_output_object(&input_source, &output_object)),
-                        input_source: input_source,
+                            }));
+                        map.entry(language)
+                            .or_insert_with(|| Vec::new())
+                            .push(get_full_path(&shared.command.current_dir, &input_source));
+                        Ok(map)
                     })
+                }));
+
+            let output = get_full_path(&shared.command.current_dir,
+                                       output_object.as_ref().map(|p| p.as_path()).unwrap_or_else(|| Path::new(".")));
+            Ok(sources.into_iter()
+                .map(|(language, sources)| {
+                    CompilationTask {
+                        shared: shared.clone(),
+                        language: language,
+                        output_object: output.clone(),
+                        input_sources: sources,
+                    }
                 })
-                .collect()
+                .collect())
         })
 }
 
-fn get_output_object(input_source: &Path, output_object: &Option<PathBuf>) -> Result<PathBuf, String> {
-    output_object.as_ref().map_or_else(|| Ok(input_source.with_extension("obj")),
-                                       |path| match path.is_dir() {
-                                           true => {
-                                               input_source.file_name()
-                                                   .map(|name| path.join(name).with_extension("obj"))
-                                                   .ok_or_else(|| {
-                                                       format!("Input file path does not contains file name: {}",
-                                                               input_source.to_string_lossy())
-                                                   })
-                                           }
-                                           false => Ok(path.clone()),
-                                       })
+fn get_full_path(cwd: &Option<PathBuf>, path: &Path) -> PathBuf {
+    cwd.as_ref().map(|c| c.join(path)).unwrap_or(path.to_path_buf())
 }
 
 fn find_param<T, R, F: Fn(&T) -> Option<R>>(args: &Vec<T>, filter: F) -> ParamValue<R> {

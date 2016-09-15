@@ -87,7 +87,13 @@ impl BuildAction {
         match self {
             &BuildAction::Empty => Cow::Borrowed(""),
             &BuildAction::Exec(_, ref args) => Cow::Owned(format!("{:?}", args)),
-            &BuildAction::Compilation(_, ref task) => Cow::Borrowed(task.input_source.to_str().unwrap_or("")),
+            &BuildAction::Compilation(_, ref task) => {
+                Cow::Owned(task.input_sources
+                    .iter()
+                    .map(|path| -> String { path.to_string_lossy().into_owned() })
+                    .collect::<Vec<String>>()
+                    .join(", "))
+            }
         }
     }
 }

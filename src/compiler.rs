@@ -370,7 +370,7 @@ pub struct CompilationTask {
     // Source language.
     pub language: String,
     // Input source file name.
-    pub input_source: PathBuf,
+    pub input_sources: Vec<PathBuf>,
     // Output object file name.
     pub output_object: PathBuf,
 }

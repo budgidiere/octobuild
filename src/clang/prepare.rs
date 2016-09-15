@@ -147,7 +147,7 @@ pub fn create_tasks(command: CommandInfo, args: &[String]) -> Result<Vec<Compila
                                 source.as_os_str().to_string_lossy())
                     })),
                 output_object: output_object.as_ref().map_or_else(|| source.with_extension("o"), |path| path.clone()),
-                input_source: source,
+                input_sources: vec![source],
             })
         })
         .collect()

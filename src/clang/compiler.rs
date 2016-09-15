@@ -120,7 +120,8 @@ impl Toolchain for ClangToolchain {
         }
 
         // Add preprocessor paramters.
-        args.push(task.input_source.display().to_string());
+        assert!(task.input_sources.len() == 1);
+        args.push(task.input_sources[0].display().to_string());
         args.push("-o".to_string());
         args.push("-".to_string());
 

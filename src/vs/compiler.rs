@@ -130,58 +130,61 @@ impl Toolchain for VsToolchain {
                        task: &CompilationTask,
                        worker: &Fn(PreprocessResult) -> Result<(), Error>)
                        -> Result<(), Error> {
-        // Make parameters list for preprocessing.
-        let mut args = filter(&task.shared.args, |arg: &Arg| -> Option<String> {
-            match arg {
-                &Arg::Flag { ref scope, ref flag } => {
-                    match scope {
-                        &Scope::Preprocessor |
-                        &Scope::Shared => Some("/".to_string() + &flag),
-                        &Scope::Ignore | &Scope::Compiler => None,
+        for input_source in task.input_sources.iter() {
+            // Make parameters list for preprocessing.
+            let mut args = filter(&task.shared.args, |arg: &Arg| -> Option<String> {
+                match arg {
+                    &Arg::Flag { ref scope, ref flag } => {
+                        match scope {
+                            &Scope::Preprocessor |
+                            &Scope::Shared => Some("/".to_string() + &flag),
+                            &Scope::Ignore | &Scope::Compiler => None,
+                        }
                     }
-                }
-                &Arg::Param { ref scope, ref flag, ref value } => {
-                    match scope {
-                        &Scope::Preprocessor |
-                        &Scope::Shared => Some("/".to_string() + &flag + &value),
-                        &Scope::Ignore | &Scope::Compiler => None,
+                    &Arg::Param { ref scope, ref flag, ref value } => {
+                        match scope {
+                            &Scope::Preprocessor |
+                            &Scope::Shared => Some("/".to_string() + &flag + &value),
+                            &Scope::Ignore | &Scope::Compiler => None,
+                        }
                     }
+                    &Arg::Input { .. } => None,
+                    &Arg::Output { .. } => None,
                 }
-                &Arg::Input { .. } => None,
-                &Arg::Output { .. } => None,
-            }
-        });
+            });
 
-        // Add preprocessor paramters.
-        args.push("/nologo".to_string());
-        args.push("/T".to_string() + &task.language);
-        args.push("/E".to_string());
-        args.push("/we4002".to_string()); // C4002: too many actual parameters for macro 'identifier'
-        args.push(task.input_source.display().to_string());
+            // Add preprocessor paramters.
+            args.push("/nologo".to_string());
+            args.push("/T".to_string() + &task.language);
+            args.push("/E".to_string());
+            args.push("/we4002".to_string()); // C4002: too many actual parameters for macro 'identifier'
+            args.push(input_source.display().to_string());
 
-        let mut command = task.shared.command.to_command();
-        command.args(&args)
-            .arg(&join_flag("/Fo", &task.output_object)); // /Fo option also set output path for #import directive
-        let output = try!(state.wrap_slow(|| command.output()));
-        let preprocess_result = if output.status.success() {
-            let mut content = MemStream::new();
-            if task.shared.input_precompiled.is_some() || task.shared.output_precompiled.is_some() {
-                try!(postprocess::filter_preprocessed(&mut Cursor::new(output.stdout),
-                                                      &mut content,
-                                                      &task.shared.marker_precompiled,
-                                                      task.shared.output_precompiled.is_some()));
+            let mut command = task.shared.command.to_command();
+            command.args(&args)
+                .arg(&join_flag("/Fo", &task.output_object)); // /Fo option also set output path for #import directive
+            let output = try!(state.wrap_slow(|| command.output()));
+            let preprocess_result = if output.status.success() {
+                let mut content = MemStream::new();
+                if task.shared.input_precompiled.is_some() || task.shared.output_precompiled.is_some() {
+                    try!(postprocess::filter_preprocessed(&mut Cursor::new(output.stdout),
+                                                          &mut content,
+                                                          &task.shared.marker_precompiled,
+                                                          task.shared.output_precompiled.is_some()));
+                } else {
+                    try!(content.write(&output.stdout));
+                };
+                PreprocessResult::Success(content)
             } else {
-                try!(content.write(&output.stdout));
+                PreprocessResult::Failed(OutputInfo {
+                    status: output.status.code(),
+                    stdout: Vec::new(),
+                    stderr: output.stderr,
+                })
             };
-            PreprocessResult::Success(content)
-        } else {
-            PreprocessResult::Failed(OutputInfo {
-                status: output.status.code(),
-                stdout: Vec::new(),
-                stderr: output.stderr,
-            })
-        };
-        worker(preprocess_result)
+            try!(worker(preprocess_result));
+        }
+        Ok(())
     }
 
     // Compile preprocessed file.
