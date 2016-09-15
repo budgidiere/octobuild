@@ -1,18 +1,16 @@
-extern crate filetime;
-
 use std::path::{Path, PathBuf};
 use std::fs;
 use std::fs::File;
 use std::io::{Error, ErrorKind};
 
-use self::filetime::FileTime;
+use filetime::FileTime;
 
-use super::config::Config;
-use super::compiler::OutputInfo;
-use super::io::memcache::MemCache;
-use super::io::filecache::FileCache;
-use super::io::statistic::Statistic;
-use super::utils::hash_stream;
+use ::config::Config;
+use ::compiler::OutputInfo;
+use ::io::memcache::MemCache;
+use ::io::filecache::FileCache;
+use ::io::statistic::Statistic;
+use ::utils::hash_stream;
 
 pub struct Cache {
     file_cache: FileCache,

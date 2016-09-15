@@ -4,22 +4,23 @@ extern crate log;
 #[macro_use]
 extern crate lazy_static;
 
-extern crate local_encoding;
-extern crate libc;
 extern crate byteorder;
 extern crate capnp;
 extern crate crossbeam;
-extern crate fern;
-extern crate hyper;
 extern crate crypto;
+extern crate fern;
+extern crate filetime;
+extern crate hyper;
+extern crate ipc;
+extern crate libc;
+extern crate local_encoding;
+extern crate petgraph;
+extern crate rand;
+extern crate regex;
 extern crate rustc_serialize;
 extern crate tempdir;
 extern crate time;
 extern crate uuid;
-extern crate rand;
-extern crate petgraph;
-extern crate regex;
-extern crate ipc;
 #[cfg(windows)]
 extern crate winapi;
 
