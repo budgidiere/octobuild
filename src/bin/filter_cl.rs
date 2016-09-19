@@ -2,29 +2,49 @@ extern crate clap;
 extern crate octobuild;
 
 use clap::{App, AppSettings, Arg};
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Error, Read, Write};
 use std::fs::File;
 
 use self::octobuild::version::{AUTHORS, VERSION};
 use self::octobuild::vs::postprocess;
+use self::octobuild::vs::postprocess::PostprocessWrite;
+
+struct OutputWrapper {
+    content: Vec<u8>,
+}
+
+impl Write for OutputWrapper {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Error> {
+        self.content.write(buf)
+    }
+    fn flush(&mut self) -> Result<(), Error> {
+        self.content.flush()
+    }
+}
+
+impl PostprocessWrite for OutputWrapper {
+    fn is_source_separator(&mut self, marker: &[u8]) -> Result<bool, Error> {
+        Ok(false)
+    }
+}
 
 fn bench_filter(path: &str, marker: &Option<String>, keep_headers: bool, num: usize) -> Vec<u8> {
     let mut source = Vec::new();
     File::open(path).unwrap().read_to_end(&mut source).unwrap();
 
     let mut total: usize = 0;
-    let mut result = Vec::with_capacity(source.len());
+    let mut result = OutputWrapper { content: Vec::with_capacity(source.len()) };
     for _ in 0..num {
-        result.clear();
+        result.content.clear();
         postprocess::filter_preprocessed(&mut Cursor::new(source.clone()),
                                          &mut result,
                                          &marker,
                                          keep_headers)
             .unwrap();
-        total += result.len();
+        total += result.content.len();
     }
-    assert_eq!(total / num, result.len());
-    result
+    assert_eq!(total / num, result.content.len());
+    result.content
 }
 
 fn main() {

@@ -7,6 +7,7 @@ use tempdir::TempDir;
 pub use ::compiler::*;
 
 use ::vs::postprocess;
+use ::vs::postprocess::PostprocessWrite;
 use ::utils::filter;
 use ::io::memstream::MemStream;
 use ::io::tempfile::TempFile;
@@ -79,7 +80,7 @@ impl Compiler for VsCompiler {
         use self::winreg::RegKey;
         use self::winreg::enums::*;
 
-        lazy_static!{
+        lazy_static! {
 			static ref RE:self::regex::Regex = self::regex::Regex::new(r"^\d+\.\d+$").unwrap();
 		}
 
@@ -113,6 +114,30 @@ impl Compiler for VsCompiler {
             .map(|cl| -> Arc<Toolchain> { Arc::new(VsToolchain::new(cl, &self.temp_dir)) })
             .filter(|toolchain| toolchain.identifier().is_some())
             .collect()
+    }
+}
+
+struct VsContent {
+    input_source: String,
+    content: MemStream,
+}
+
+struct VsPreprocessor {
+    content: MemStream,
+}
+
+impl Write for VsPreprocessor {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Error> {
+        self.content.write(buf)
+    }
+    fn flush(&mut self) -> Result<(), Error> {
+        self.content.flush()
+    }
+}
+
+impl PostprocessWrite for VsPreprocessor {
+    fn is_source_separator(&mut self, marker: &[u8]) -> Result<bool, Error> {
+        Ok(false)
     }
 }
 
@@ -165,16 +190,12 @@ impl Toolchain for VsToolchain {
                 .arg(&join_flag("/Fo", &task.output_object)); // /Fo option also set output path for #import directive
             let output = try!(state.wrap_slow(|| command.output()));
             let preprocess_result = if output.status.success() {
-                let mut content = MemStream::new();
-                if task.shared.input_precompiled.is_some() || task.shared.output_precompiled.is_some() {
-                    try!(postprocess::filter_preprocessed(&mut Cursor::new(output.stdout),
-                                                          &mut content,
-                                                          &task.shared.marker_precompiled,
-                                                          task.shared.output_precompiled.is_some()));
-                } else {
-                    try!(content.write(&output.stdout));
-                };
-                PreprocessResult::Success(content)
+                let mut preprocessor = VsPreprocessor { content: MemStream::new() };
+                try!(postprocess::filter_preprocessed(&mut Cursor::new(output.stdout),
+                                                      &mut preprocessor,
+                                                      &task.shared.marker_precompiled,
+                                                      task.shared.output_precompiled.is_some()));
+                PreprocessResult::Success(preprocessor.content)
             } else {
                 PreprocessResult::Failed(OutputInfo {
                     status: output.status.code(),

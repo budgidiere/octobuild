@@ -18,6 +18,10 @@ pub enum PostprocessError {
     TokenTooLong,
 }
 
+pub trait PostprocessWrite: Write {
+    fn is_source_separator(&mut self, marker: &[u8]) -> Result<bool, Error>;
+}
+
 const BUF_SIZE: usize = 0x10000;
 
 impl Display for PostprocessError {
@@ -55,18 +59,8 @@ impl ::std::error::Error for PostprocessError {
     }
 }
 
-#[derive(PartialEq)]
-#[derive(Hash)]
-#[derive(Eq)]
-#[derive(Clone)]
-#[derive(Debug)]
-pub enum Include<T> {
-    Quoted(T),
-    Angle(T),
-}
-
 pub fn filter_preprocessed(reader: &mut Read,
-                           writer: &mut Write,
+                           writer: &mut PostprocessWrite,
                            marker: &Option<String>,
                            keep_headers: bool)
                            -> Result<(), Error> {
@@ -75,6 +69,7 @@ pub fn filter_preprocessed(reader: &mut Read,
         ptr_copy: ptr::null(),
         ptr_read: ptr::null(),
         ptr_end: ptr::null(),
+        block: 0,
 
         reader: reader,
         writer: writer,
@@ -109,11 +104,12 @@ pub fn filter_preprocessed(reader: &mut Read,
                 }
             }
             try!(state.parse_line());
-            if state.done {
-                return state.copy_to_end();
-            }
         }
-        Err(Error::new(ErrorKind::InvalidInput, PostprocessError::MarkerNotFound))
+        if state.done {
+            Ok(())
+        } else {
+            Err(Error::new(ErrorKind::InvalidInput, PostprocessError::MarkerNotFound))
+        }
     }
 }
 
@@ -122,9 +118,10 @@ struct ScannerState<'a> {
     ptr_copy: *const u8,
     ptr_read: *const u8,
     ptr_end: *const u8,
+    block: i32,
 
     reader: &'a mut Read,
-    writer: &'a mut Write,
+    writer: &'a mut PostprocessWrite,
 
     keep_headers: bool,
     marker: Option<Vec<u8>>,
@@ -158,35 +155,41 @@ impl<'a> ScannerState<'a> {
         self.ptr_read = self.ptr_read.offset(1);
     }
 
+    unsafe fn preload(&mut self, need: usize) -> Result<(), Error> {
+        try!(self.flush());
+
+        self.block += 1;
+        let mut loaded = delta(self.ptr_read, self.ptr_end);
+        if loaded < need {
+            let base = self.buf_data.as_mut_ptr();
+            ptr::copy(self.ptr_read, base, loaded);
+            while loaded < need {
+                let read = try!(self.reader.read(&mut self.buf_data[loaded..]));
+                if read == 0 {
+                    break;
+                }
+                loaded += read;
+            }
+            self.ptr_read = base;
+            self.ptr_copy = base;
+            self.ptr_end = base.offset(loaded as isize);
+        }
+        Ok(())
+    }
     unsafe fn read(&mut self) -> Result<bool, Error> {
         debug_assert!(self.ptr_read == self.ptr_end);
         try!(self.flush());
         let base = self.buf_data.as_ptr();
+        self.block += 1;
         self.ptr_read = base;
         self.ptr_copy = base;
         self.ptr_end = base.offset(try!(self.reader.read(&mut self.buf_data)) as isize);
         Ok(self.ptr_read != self.ptr_end)
     }
 
-    unsafe fn copy_to_end(&mut self) -> Result<(), Error> {
-        try!(self.writer.write(slice::from_raw_parts(self.ptr_copy, delta(self.ptr_copy, self.ptr_end))));
-        self.ptr_copy = self.buf_data.as_ptr();
-        self.ptr_end = self.buf_data.as_ptr();
-        loop {
-            match try!(self.reader.read(&mut self.buf_data)) {
-                0 => {
-                    return Ok(());
-                }
-                size => {
-                    try!(self.writer.write(&self.buf_data[0..size]));
-                }
-            }
-        }
-    }
-
     unsafe fn flush(&mut self) -> Result<(), Error> {
         if self.ptr_copy != self.ptr_read {
-            if self.keep_headers {
+            if self.keep_headers || self.done {
                 try!(self.writer.write(slice::from_raw_parts(self.ptr_copy, delta(self.ptr_copy, self.ptr_read))));
             }
             self.ptr_copy = self.ptr_read;
@@ -216,10 +219,7 @@ impl<'a> ScannerState<'a> {
     unsafe fn parse_line(&mut self) -> Result<(), Error> {
         try!(self.parse_empty());
         match try!(self.peek()) {
-            Some(b'#') => {
-                self.next();
-                self.parse_directive()
-            }
+            Some(b'#') => self.parse_directive(),
             Some(_) => {
                 try!(self.next_line());
                 Ok(())
@@ -274,10 +274,15 @@ impl<'a> ScannerState<'a> {
     }
 
     unsafe fn parse_directive(&mut self) -> Result<(), Error> {
+        if self.done {
+            try!(self.preload(0x400));
+        }
+        let block = self.block;
+        self.next();
         try!(self.parse_spaces());
         let mut token = [0; 0x10];
         match &try!(self.parse_token(&mut token))[..] {
-            b"line" => self.parse_directive_line(),
+            b"line" => self.parse_directive_line(block),
             b"pragma" => self.parse_directive_pragma(),
             _ => {
                 try!(self.next_line());
@@ -286,7 +291,7 @@ impl<'a> ScannerState<'a> {
         }
     }
 
-    unsafe fn parse_directive_line(&mut self) -> Result<(), Error> {
+    unsafe fn parse_directive_line(&mut self, block: i32) -> Result<(), Error> {
         let mut line_token = [0; 0x10];
         let mut file_token = [0; 0x400];
         let mut file_raw = [0; 0x400];
@@ -295,10 +300,23 @@ impl<'a> ScannerState<'a> {
         try!(self.parse_spaces());
         let (file, raw) = try!(self.parse_path(&mut file_token, &mut file_raw));
         let eol = try!(self.next_line_eol());
+        if line == b"1" {
+            if try!(self.writer.is_source_separator(file)) {
+                self.done = false;
+                self.header_found = false;
+                self.entry_file = None;
+                if !self.keep_headers {
+                    // Skip current directive.
+                    self.ptr_copy = self.ptr_read;
+                }
+                if self.block != block {
+                    return Err(Error::new(ErrorKind::InvalidInput, PostprocessError::TokenTooLong));
+                }
+            }
+        }
         self.entry_file = match self.entry_file.take() {
             Some(path) => {
                 if self.header_found && (path == file) {
-                    self.done = true;
                     let mut mark = Vec::with_capacity(0x400);
                     try!(mark.write(b"#pragma hdrstop"));
                     try!(mark.write(&eol));
@@ -308,6 +326,7 @@ impl<'a> ScannerState<'a> {
                     try!(mark.write(&raw));
                     try!(mark.write(&eol));
                     try!(self.write(&mark));
+                    self.done = true;
                 }
                 match &self.marker {
                     &Some(ref path) => {
@@ -329,10 +348,13 @@ impl<'a> ScannerState<'a> {
         let mut token = [0; 0x20];
         match &try!(self.parse_token(&mut token))[..] {
             b"hdrstop" => {
-                if !self.keep_headers {
-                    try!(self.write(b"#pragma hdrstop"));
+                if !self.done {
+                    try!(self.flush());
+                    if !self.keep_headers {
+                        try!(self.write(b"#pragma hdrstop"));
+                    }
+                    self.done = true;
                 }
-                self.done = true;
             }
             _ => {
                 try!(self.next_line());
@@ -486,52 +508,119 @@ unsafe fn delta(beg: *const u8, end: *const u8) -> usize {
 
 #[cfg(test)]
 mod test {
-    use std::io::{Cursor, Write};
+    use ::vs::postprocess::PostprocessWrite;
 
-    fn check_filter_pass(original: &str, expected: &str, marker: &Option<String>, keep_headers: bool, eol: &str) {
-        let mut writer: Vec<u8> = Vec::new();
+    use std::collections::HashSet;
+    use std::io::{Cursor, Error, Write};
+
+    struct OutputWrapper<'a> {
+        content: Vec<u8>,
+        sources: HashSet<&'a [u8]>,
+        eol: &'a [u8],
+    }
+
+    impl<'a> Write for OutputWrapper<'a> {
+        fn write(&mut self, buf: &[u8]) -> Result<usize, Error> {
+            self.content.write(buf)
+        }
+        fn flush(&mut self) -> Result<(), Error> {
+            self.content.flush()
+        }
+    }
+
+    impl<'a> PostprocessWrite for OutputWrapper<'a> {
+        fn is_source_separator(&mut self, marker: &[u8]) -> Result<bool, Error> {
+            if self.sources.remove(marker) {
+                try!(self.content.write(b"/// "));
+                try!(self.content.write(marker));
+                try!(self.content.write(self.eol));
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+    }
+
+    fn check_filter_pass(original: &str,
+                         expected: &str,
+                         sources: &[&str],
+                         marker: &Option<String>,
+                         keep_headers: bool,
+                         eol: &str) {
         let mut stream: Vec<u8> = Vec::new();
         stream.write(&original.replace("\n", eol).as_bytes()[..]).unwrap();
-        match super::filter_preprocessed(&mut Cursor::new(stream), &mut writer, marker, keep_headers) {
+        let mut wrapper = OutputWrapper {
+            content: Vec::new(),
+            sources: HashSet::new(),
+            eol: eol.as_bytes(),
+        };
+        for source in sources.iter() {
+            wrapper.sources.insert(source.as_bytes());
+        }
+        match super::filter_preprocessed(&mut Cursor::new(stream), &mut wrapper, marker, keep_headers) {
             Ok(_) => {
-                assert_eq!(String::from_utf8_lossy(&writer),
-                           expected.replace("\n", eol))
+                let actual = String::from_utf8_lossy(&wrapper.content);
+                if actual != expected.replace("\n", eol) {
+                    println!("==== ACTUAL ====\n{}\n", actual.replace("\r", ""));
+                    println!("=== EXPECTED ===\n{}\n", expected.replace("\r", ""));
+                }
+                assert_eq!(actual, expected.replace("\n", eol));
+                assert_eq!(wrapper.sources.len(), 0);
             }
             Err(e) => {
+                println!("{:?}", e);
                 panic!(e);
             }
         }
     }
 
-    fn check_filter(original: &str, expected: &str, marker: Option<String>, keep_headers: bool) {
-        check_filter_pass(original, expected, &marker, keep_headers, "\n");
-        check_filter_pass(original, expected, &marker, keep_headers, "\r\n");
+    fn check_filter(original: &str, expected: &str, source: &str, marker: Option<String>, keep_headers: bool) {
+        check_filter_pass(original, expected, &[source], &marker, keep_headers, "\n");
+        check_filter_pass(original, expected, &[source], &marker, keep_headers, "\r\n");
+
+        let second = "./sample.foo.cpp";
+        let original_multi = original.to_string() + &original.replace(source, second);
+        let expected_multi = expected.to_string() + &expected.replace(source, second);
+        check_filter_pass(&original_multi,
+                          &expected_multi,
+                          &[source, second],
+                          &marker,
+                          keep_headers,
+                          "\n");
+        check_filter_pass(&original_multi,
+                          &expected_multi,
+                          &[source, second],
+                          &marker,
+                          keep_headers,
+                          "\r\n");
     }
 
     #[test]
     fn test_filter_precompiled_keep() {
-        check_filter(r#"#line 1 "sample.cpp"
+        check_filter(r#"#line 1 "./sample.cpp"
 #line 1 "e:/work/octobuild/test_cl/sample header.h"
 # pragma once
 void hello();
-#line 2 "sample.cpp"
+#line 2 "./sample.cpp"
 
 int main(int argc, char **argv) {
 	return 0;
 }
 "#,
-                     r#"#line 1 "sample.cpp"
+                     r#"/// ./sample.cpp
+#line 1 "./sample.cpp"
 #line 1 "e:/work/octobuild/test_cl/sample header.h"
 # pragma once
 void hello();
-#line 2 "sample.cpp"
+#line 2 "./sample.cpp"
 #pragma hdrstop
-#line 2 "sample.cpp"
+#line 2 "./sample.cpp"
 
 int main(int argc, char **argv) {
 	return 0;
 }
 "#,
+                     "./sample.cpp",
                      Some("sample header.h".to_string()),
                      true)
     }
@@ -549,13 +638,15 @@ int main(int argc, char **argv) {
 	return 0;
 }
 "#,
-                     r#"#pragma hdrstop
+                     r#"/// sample.cpp
+#pragma hdrstop
 #line 2 "sample.cpp"
 
 int main(int argc, char **argv) {
 	return 0;
 }
 "#,
+                     "sample.cpp",
                      Some("sample header.h".to_string()),
                      false);
     }
@@ -573,13 +664,15 @@ int main(int argc, char **argv) {
     return 0;
 }
 "#,
-                     r#"#pragma hdrstop
+                     r#"/// sample.cpp
+#pragma hdrstop
 #line 2 "sample.cpp"
 
 int main(int argc, char **argv) {
     return 0;
 }
 "#,
+                     "sample.cpp",
                      Some("STDafx.h".to_string()),
                      false);
     }
@@ -598,7 +691,8 @@ int main(int argc, char **argv) {
 	return 0;
 }
 "#,
-                     r#"#pragma hdrstop
+                     r#"/// sample.cpp
+#pragma hdrstop
 void data();
 # pragma once
 #line 2 "sample.cpp"
@@ -607,6 +701,7 @@ int main(int argc, char **argv) {
 	return 0;
 }
 "#,
+                     "sample.cpp",
                      None,
                      false);
     }
@@ -625,7 +720,8 @@ int main(int argc, char **argv) {
 	return 0;
 }
 "#,
-                     r#"#line 1 "sample.cpp"
+                     r#"/// sample.cpp
+#line 1 "sample.cpp"
  #line 1 "e:/work/octobuild/test_cl/sample header.h"
 void hello();
 # pragma  hdrstop
@@ -637,6 +733,7 @@ int main(int argc, char **argv) {
 	return 0;
 }
 "#,
+                     "sample.cpp",
                      None,
                      true);
     }
@@ -653,7 +750,8 @@ int main(int argc, char **argv) {
 	return 0;
 }
 "#,
-                     r#"#line 1 "sample.cpp"
+                     r#"/// sample.cpp
+#line 1 "sample.cpp"
 #line 1 "e:\\work\\octobuild\\test_cl\\sample header.h"
 # pragma once
 void hello();
@@ -665,6 +763,7 @@ int main(int argc, char **argv) {
 	return 0;
 }
 "#,
+                     "sample.cpp",
                      Some("e:\\work\\octobuild\\test_cl\\sample header.h".to_string()),
                      true);
     }
