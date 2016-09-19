@@ -266,8 +266,8 @@ fn execute(command: &mut Command) -> Result<PreprocessResult, Error> {
         stream.recv().unwrap().unwrap_or(Vec::new())
     }
 
-    let stdout = read_stdout(child.stdout.take().map(|f| CommentsRemover::new(f)));
     let rx_err = read_stderr(child.stderr.take());
+    let stdout = read_stdout(child.stdout.take().map(|f| CommentsRemover::new(f)));
     let status = try!(child.wait());
     let stderr = bytes(rx_err);
 
@@ -281,6 +281,7 @@ fn execute(command: &mut Command) -> Result<PreprocessResult, Error> {
         }))
     }
 }
+
 #[cfg(test)]
 mod test {
     #[test]
