@@ -24,6 +24,9 @@ impl Write for OutputWrapper {
 
 impl PostprocessWrite for OutputWrapper {
     fn is_source_separator(&mut self, marker: &[u8]) -> Result<bool, Error> {
+        try!(self.content.write(b"/// "));
+        try!(self.content.write(marker));
+        try!(self.content.write(b"\n"));
         Ok(false)
     }
 }
@@ -38,6 +41,7 @@ fn bench_filter(path: &str, marker: &Option<String>, keep_headers: bool, num: us
         result.content.clear();
         postprocess::filter_preprocessed(&mut Cursor::new(source.clone()),
                                          &mut result,
+                                         true,
                                          &marker,
                                          keep_headers)
             .unwrap();

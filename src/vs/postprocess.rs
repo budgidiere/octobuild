@@ -61,6 +61,7 @@ impl ::std::error::Error for PostprocessError {
 
 pub fn filter_preprocessed(reader: &mut Read,
                            writer: &mut PostprocessWrite,
+                           use_precompiled: bool,
                            marker: &Option<String>,
                            keep_headers: bool)
                            -> Result<(), Error> {
@@ -78,6 +79,7 @@ pub fn filter_preprocessed(reader: &mut Read,
         marker: None,
         utf8: false,
         header_found: false,
+        use_precompiled: use_precompiled || keep_headers,
         entry_file: None,
         done: false,
     };
@@ -128,6 +130,7 @@ struct ScannerState<'a> {
 
     utf8: bool,
     header_found: bool,
+    use_precompiled: bool,
     entry_file: Option<Vec<u8>>,
     done: bool,
 }
@@ -302,7 +305,7 @@ impl<'a> ScannerState<'a> {
         let eol = try!(self.next_line_eol());
         if line == b"1" {
             if try!(self.writer.is_source_separator(file)) {
-                self.done = false;
+                self.done = !self.use_precompiled;
                 self.header_found = false;
                 self.entry_file = None;
                 if !self.keep_headers {

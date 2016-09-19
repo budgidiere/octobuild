@@ -2,9 +2,10 @@ extern crate regex;
 #[cfg(windows)]
 extern crate winreg;
 
-use tempdir::TempDir;
-
 pub use ::compiler::*;
+
+use tempdir::TempDir;
+use local_encoding::{Encoder, Encoding};
 
 use ::vs::postprocess;
 use ::vs::postprocess::PostprocessWrite;
@@ -12,14 +13,18 @@ use ::utils::filter;
 use ::io::memstream::MemStream;
 use ::io::tempfile::TempFile;
 use ::lazy::Lazy;
+use ::regex::bytes::{NoExpand, Regex};
 
+use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Cursor, Error, ErrorKind, Read, Write};
 use std::env;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
-use self::regex::bytes::{NoExpand, Regex};
+use std::sync::mpsc::{Receiver, channel};
+use std::thread;
 
 pub struct VsCompiler {
     temp_dir: Arc<TempDir>,
@@ -117,27 +122,59 @@ impl Compiler for VsCompiler {
     }
 }
 
-struct VsContent {
-    input_source: String,
+struct VsContent<'a> {
+    input_source: &'a Path,
     content: MemStream,
 }
 
-struct VsPreprocessor {
-    content: MemStream,
+struct VsPreprocessor<'a> {
+    content: Option<VsContent<'a>>,
+    pending: HashSet<&'a Path>,
+    sources: HashMap<Vec<u8>, &'a Path>,
+    worker: &'a Fn(&Path, PreprocessResult) -> Result<(), Error>,
 }
 
-impl Write for VsPreprocessor {
+impl<'a> VsPreprocessor<'a> {
+    fn exec(&mut self) -> Result<(), Error> {
+        match self.content.take() {
+            Some(c) => (self.worker)(c.input_source, PreprocessResult::Success(c.content)),
+            None => Ok(()),
+        }
+    }
+}
+
+impl<'a> Write for VsPreprocessor<'a> {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Error> {
-        self.content.write(buf)
+        match self.content {
+            Some(ref mut c) => c.content.write(buf),
+            None => Ok(buf.len()),
+        }
     }
     fn flush(&mut self) -> Result<(), Error> {
-        self.content.flush()
+        match self.content {
+            Some(ref mut c) => c.content.flush(),
+            None => Ok(()),
+        }
     }
 }
 
-impl PostprocessWrite for VsPreprocessor {
+impl<'a> PostprocessWrite for VsPreprocessor<'a> {
     fn is_source_separator(&mut self, marker: &[u8]) -> Result<bool, Error> {
-        Ok(false)
+        let path = match self.sources.remove(marker) {
+            Some(path) => {
+                if !self.pending.remove(path) {
+                    return Ok(false);
+                }
+                path
+            }
+            None => return Ok(false),
+        };
+        try!(self.exec());
+        self.content = Some(VsContent {
+            input_source: path,
+            content: MemStream::new(),
+        });
+        Ok(true)
     }
 }
 
@@ -155,57 +192,40 @@ impl Toolchain for VsToolchain {
                        task: &CompilationTask,
                        worker: &Fn(&Path, PreprocessResult) -> Result<(), Error>)
                        -> Result<(), Error> {
-        for input_source in task.input_sources.iter() {
-            // Make parameters list for preprocessing.
-            let mut args = filter(&task.shared.args, |arg: &Arg| -> Option<String> {
-                match arg {
-                    &Arg::Flag { ref scope, ref flag } => {
-                        match scope {
-                            &Scope::Preprocessor |
-                            &Scope::Shared => Some("/".to_string() + &flag),
-                            &Scope::Ignore | &Scope::Compiler => None,
-                        }
+        // Make parameters list for preprocessing.
+        let mut args = filter(&task.shared.args, |arg: &Arg| -> Option<String> {
+            match arg {
+                &Arg::Flag { ref scope, ref flag } => {
+                    match scope {
+                        &Scope::Preprocessor |
+                        &Scope::Shared => Some("/".to_string() + &flag),
+                        &Scope::Ignore | &Scope::Compiler => None,
                     }
-                    &Arg::Param { ref scope, ref flag, ref value } => {
-                        match scope {
-                            &Scope::Preprocessor |
-                            &Scope::Shared => Some("/".to_string() + &flag + &value),
-                            &Scope::Ignore | &Scope::Compiler => None,
-                        }
-                    }
-                    &Arg::Input { .. } => None,
-                    &Arg::Output { .. } => None,
                 }
-            });
+                &Arg::Param { ref scope, ref flag, ref value } => {
+                    match scope {
+                        &Scope::Preprocessor |
+                        &Scope::Shared => Some("/".to_string() + &flag + &value),
+                        &Scope::Ignore | &Scope::Compiler => None,
+                    }
+                }
+                &Arg::Input { .. } => None,
+                &Arg::Output { .. } => None,
+            }
+        });
 
-            // Add preprocessor paramters.
-            args.push("/nologo".to_string());
-            args.push("/T".to_string() + &task.language);
-            args.push("/E".to_string());
-            args.push("/we4002".to_string()); // C4002: too many actual parameters for macro 'identifier'
-            args.push(input_source.display().to_string());
+        // Add preprocessor paramters.
+        args.push("/nologo".to_string());
+        args.push("/T".to_string() + &task.language);
+        args.push("/E".to_string());
+        args.push("/we4002".to_string()); // C4002: too many actual parameters for macro 'identifier'
 
-            let mut command = task.shared.command.to_command();
-            command.args(&args)
-                .arg(&join_flag("/Fo", &task.output_object)); // /Fo option also set output path for #import directive
-            let output = try!(state.wrap_slow(|| command.output()));
-            let preprocess_result = if output.status.success() {
-                let mut preprocessor = VsPreprocessor { content: MemStream::new() };
-                try!(postprocess::filter_preprocessed(&mut Cursor::new(output.stdout),
-                                                      &mut preprocessor,
-                                                      &task.shared.marker_precompiled,
-                                                      task.shared.output_precompiled.is_some()));
-                PreprocessResult::Success(preprocessor.content)
-            } else {
-                PreprocessResult::Failed(OutputInfo {
-                    status: output.status.code(),
-                    stdout: Vec::new(),
-                    stderr: output.stderr,
-                })
-            };
-            try!(worker(input_source, preprocess_result));
-        }
-        Ok(())
+        let mut command = task.shared
+            .command
+            .to_command();
+        command.args(&args)
+            .arg(&join_flag("/Fo", &task.output_object)); // /Fo option also set output path for #import directive
+        state.wrap_slow(|| execute(command, &task, worker))
     }
 
     // Compile preprocessed file.
@@ -332,6 +352,86 @@ fn get_output_object(input_source: &Path, output_object: &Path) -> Result<PathBu
         }
         false => Ok(output_object.to_path_buf()),
     }
+}
+
+fn execute(mut command: Command,
+           task: &CompilationTask,
+           worker: &Fn(&Path, PreprocessResult) -> Result<(), Error>)
+           -> Result<(), Error> {
+    assert!(task.input_sources.len() > 0);
+
+    let mut pending: HashSet<&Path> = HashSet::new();
+    let mut sources: HashMap<Vec<u8>, &Path> = HashMap::new();
+    for iter in task.input_sources.iter() {
+        pending.insert(iter);
+        // We make non-canonical path for detecting first file line in solid preprocessor output
+        let strange_path: PathBuf = match iter.parent() {
+            Some(parent) => parent.join(".").join(iter.file_name().unwrap()),
+            None => iter.to_path_buf(),
+        };
+
+        let path_str = strange_path.to_string_lossy().into_owned().replace("\\", "/");
+        // UTF-8 path
+        sources.insert(path_str.as_bytes().to_vec(), iter);
+        // Local encoding
+        Encoding::ANSI.to_bytes(&path_str).ok().map(|key| sources.insert(key, iter));
+
+        command.arg(path_str);
+    }
+
+    let mut child = try!(command.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn());
+    drop(child.stdin.take());
+
+    fn read_stderr<T: Read + Send + 'static>(stream: Option<T>) -> Receiver<Result<Vec<u8>, Error>> {
+        let (tx, rx) = channel();
+        match stream {
+            Some(mut stream) => {
+                thread::spawn(move || {
+                    let mut ret = Vec::new();
+                    let res = stream.read_to_end(&mut ret).map(|_| ret);
+                    tx.send(res).unwrap();
+                });
+            }
+            None => tx.send(Ok(Vec::new())).unwrap(),
+        }
+        rx
+    }
+
+    fn bytes(stream: Receiver<Result<Vec<u8>, Error>>) -> Vec<u8> {
+        stream.recv().unwrap().unwrap_or(Vec::new())
+    }
+
+    let rx_err = read_stderr(child.stderr.take());
+    let mut preprocessor = VsPreprocessor {
+        content: None,
+        pending: pending,
+        sources: sources,
+        worker: worker,
+    };
+    try!(postprocess::filter_preprocessed(&mut child.stdout.take().unwrap(),
+                                          &mut preprocessor,
+                                          task.shared.input_precompiled.is_some(),
+                                          &task.shared.marker_precompiled,
+                                          task.shared.output_precompiled.is_some()));
+    try!(preprocessor.exec());
+
+    let status = try!(child.wait());
+    if !status.success() {
+        try!(worker(&task.input_sources[0],
+                    PreprocessResult::Failed(OutputInfo {
+                        status: status.code(),
+                        stdout: Vec::new(),
+                        stderr: bytes(rx_err),
+                    })));
+    }
+    if preprocessor.pending.len() > 0 {
+        return Err(Error::new(ErrorKind::Other,
+                              format!("Internal error. Unexpected preprocessor behaviour")));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
