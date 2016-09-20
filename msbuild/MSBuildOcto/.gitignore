@@ -3,3 +3,4 @@ obj/
 bin/*.dll
 bin/*.pdb
 *.suo
+*.nlp
