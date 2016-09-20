@@ -6,7 +6,6 @@ use ipc::Semaphore;
 use thread_local::ThreadLocal;
 
 use std::cell::Cell;
-use std::cmp::max;
 use std::collections::HashMap;
 use std::collections::hash_map;
 use std::env;
@@ -168,7 +167,7 @@ pub struct CompilerGroup(Vec<Box<Compiler>>);
 impl SharedState {
     pub fn new(config: &Config) -> Self {
         SharedState {
-            semaphore: Semaphore::new("octobuild-worker", max(config.process_limit, 1 as usize))
+            semaphore: Semaphore::new("octobuild-worker", config.process_limit)
                 .expect("Can't create semaphore for limit CPU usage"),
             statistic: Statistic::new(),
             cache: Cache::new(&config),

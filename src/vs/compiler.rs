@@ -7,6 +7,7 @@ pub use ::compiler::*;
 use tempdir::TempDir;
 use local_encoding::{Encoder, Encoding};
 
+use ::config::DEFAULT_PREPROCESS_BATCH;
 use ::vs::postprocess;
 use ::vs::postprocess::PostprocessWrite;
 use ::utils::filter;
@@ -83,16 +84,19 @@ impl VsArgs {
 pub struct VsCompiler {
     temp_dir: Arc<TempDir>,
     toolchains: ToolchainHolder,
+    preprocess_batch: usize,
 }
 
 impl VsCompiler {
     pub fn default() -> Result<Self, Error> {
-        Ok(VsCompiler::new(&Arc::new(try!(TempDir::new("octobuild")))))
+        Ok(VsCompiler::new(&Arc::new(try!(TempDir::new("octobuild"))),
+                           DEFAULT_PREPROCESS_BATCH))
     }
-    pub fn new(temp_dir: &Arc<TempDir>) -> Self {
+    pub fn new(temp_dir: &Arc<TempDir>, preprocess_batch: usize) -> Self {
         VsCompiler {
             temp_dir: temp_dir.clone(),
             toolchains: ToolchainHolder::new(),
+            preprocess_batch: preprocess_batch,
         }
     }
 }
@@ -101,14 +105,16 @@ struct VsToolchain {
     temp_dir: Arc<TempDir>,
     path: PathBuf,
     identifier: Lazy<Option<String>>,
+    preprocess_batch: usize,
 }
 
 impl VsToolchain {
-    pub fn new(path: PathBuf, temp_dir: &Arc<TempDir>) -> Self {
+    pub fn new(path: PathBuf, temp_dir: &Arc<TempDir>, preprocess_batch: usize) -> Self {
         VsToolchain {
             temp_dir: temp_dir.clone(),
             path: path,
             identifier: Lazy::new(),
+            preprocess_batch: preprocess_batch,
         }
     }
 }
@@ -122,7 +128,7 @@ impl Compiler for VsCompiler {
             .map_or(false, |n| (n == "cl.exe") || (n == "cl")) {
             command.find_executable().and_then(|path| {
                 self.toolchains.resolve(&path,
-                                        |path| Arc::new(VsToolchain::new(path, &self.temp_dir)))
+                                        |path| Arc::new(VsToolchain::new(path, &self.temp_dir, self.preprocess_batch)))
             })
         } else {
             None
@@ -170,7 +176,7 @@ impl Compiler for VsCompiler {
             })
             .flat_map(|paths| paths.into_iter())
             .filter(|cl| cl.exists())
-            .map(|cl| -> Arc<Toolchain> { Arc::new(VsToolchain::new(cl, &self.temp_dir)) })
+            .map(|cl| -> Arc<Toolchain> { Arc::new(VsToolchain::new(cl, &self.temp_dir, self.preprocess_batch)) })
             .filter(|toolchain| toolchain.identifier().is_some())
             .collect()
     }
@@ -238,7 +244,7 @@ impl Toolchain for VsToolchain {
     }
 
     fn create_tasks(&self, command: CommandInfo, args: &[String]) -> Result<Vec<CompilationTask>, String> {
-        super::prepare::create_tasks(command, args)
+        super::prepare::create_tasks(command, args, self.preprocess_batch)
     }
 
     fn preprocess_step(&self,

@@ -3,6 +3,7 @@ extern crate num_cpus;
 
 use hyper::Url;
 
+use std::cmp::max;
 use std::env;
 use std::error::Error;
 use std::fs::File;
@@ -21,16 +22,19 @@ pub struct Config {
     pub coordinator_bind: SocketAddr,
 
     pub process_limit: usize,
+    pub preprocess_batch: usize,
     pub cache_dir: PathBuf,
     pub cache_limit_mb: u32,
 }
 
+pub const DEFAULT_PREPROCESS_BATCH: usize = 20;
+
 const CONFIG_FILE_NAME: &'static str = "octobuild.conf";
 
 #[cfg(windows)]
-const DEFAULT_CACHE_DIR: &'static str = "~/.octobuild";
+pub const DEFAULT_CACHE_DIR: &'static str = "~/.octobuild";
 #[cfg(unix)]
-const DEFAULT_CACHE_DIR: &'static str = "~/.cache/octobuild";
+pub const DEFAULT_CACHE_DIR: &'static str = "~/.cache/octobuild";
 
 const PARAM_HELPER_BIND: &'static str = "helper_bind";
 const PARAM_COORDINATOR_BIND: &'static str = "coordinator_bind";
@@ -38,6 +42,7 @@ const PARAM_COORDINATOR: &'static str = "coordinator";
 const PARAM_CACHE_LIMIT: &'static str = "cache_limit_mb";
 const PARAM_CACHE_PATH: &'static str = "cache_path";
 const PARAM_PROCESS_LIMIT: &'static str = "process_limit";
+const PARAM_PREPROCESS_BATCH: &'static str = "preprocess_batch";
 
 impl Config {
     pub fn new() -> Result<Self> {
@@ -69,6 +74,7 @@ impl Config {
                                         global,
                                         PARAM_CACHE_LIMIT,
                                         |v| v.as_i64().map(|v| v as u32))
+            .map(|v| max(v, 1))
             .unwrap_or(16 * 1024);
         let cache_path = match defaults {
                 true => None,
@@ -93,7 +99,14 @@ impl Config {
                                        global,
                                        PARAM_PROCESS_LIMIT,
                                        |v| v.as_i64().map(|v| v as usize))
+            .map(|v| max(v, 1))
             .unwrap_or_else(|| num_cpus::get());
+        let preprocess_batch = get_config(local,
+                                          global,
+                                          PARAM_PREPROCESS_BATCH,
+                                          |v| v.as_i64().map(|v| v as usize))
+            .map(|v| max(v, 1))
+            .unwrap_or(DEFAULT_PREPROCESS_BATCH);
         let coordinator = get_config(local, global, PARAM_COORDINATOR, |v| match v.is_null() {
             true => None,
             false => {
@@ -120,6 +133,7 @@ impl Config {
 
         Ok(Config {
             process_limit: process_limit,
+            preprocess_batch: preprocess_batch,
             cache_dir: try!(replace_home(&cache_path)),
             cache_limit_mb: cache_limit_mb,
             coordinator: coordinator,
@@ -134,6 +148,8 @@ impl Config {
         let mut y = BTreeMap::new();
         y.insert(Yaml::String(PARAM_PROCESS_LIMIT.to_string()),
                  Yaml::Integer(self.process_limit as i64));
+        y.insert(Yaml::String(PARAM_PREPROCESS_BATCH.to_string()),
+                 Yaml::Integer(self.preprocess_batch as i64));
         y.insert(Yaml::String(PARAM_CACHE_LIMIT.to_string()),
                  Yaml::Integer(self.cache_limit_mb as i64));
         y.insert(Yaml::String(PARAM_CACHE_PATH.to_string()),

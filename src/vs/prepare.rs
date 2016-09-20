@@ -17,7 +17,10 @@ enum ParamValue<T> {
     Many(Vec<T>),
 }
 
-pub fn create_tasks(command: CommandInfo, args: &[String]) -> Result<Vec<CompilationTask>, String> {
+pub fn create_tasks(command: CommandInfo,
+                    args: &[String],
+                    preprocess_batch: usize)
+                    -> Result<Vec<CompilationTask>, String> {
     load_arguments(&command.current_dir, args.iter())
         .map_err(|e: Error| format!("IO error: {}", e))
         .and_then(|a| parse_arguments(a.iter()))
@@ -158,13 +161,24 @@ pub fn create_tasks(command: CommandInfo, args: &[String]) -> Result<Vec<Compila
             let output = get_full_path(&shared.command.current_dir,
                                        output_object.as_ref().map(|p| p.as_path()).unwrap_or_else(|| Path::new(".")));
             Ok(sources.into_iter()
-                .map(|(language, sources)| {
-                    CompilationTask {
+                .flat_map(|(language, mut sources)| {
+                    let mut tasks = Vec::new();
+                    while sources.len() > preprocess_batch {
+                        let index = sources.len() - preprocess_batch;
+                        tasks.push(CompilationTask {
+                            shared: shared.clone(),
+                            language: language.clone(),
+                            output_object: output.clone(),
+                            input_sources: sources.split_off(index),
+                        });
+                    }
+                    tasks.push(CompilationTask {
                         shared: shared.clone(),
                         language: language,
                         output_object: output.clone(),
                         input_sources: sources,
-                    }
+                    });
+                    tasks.into_iter()
                 })
                 .collect())
         })

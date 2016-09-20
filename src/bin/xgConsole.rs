@@ -131,7 +131,7 @@ fn execute(args: &[String]) -> Result<Option<i32>, Error> {
     let config = try!(Config::new());
     let state = SharedState::new(&config);
     let compiler = RemoteCompiler::new(&config.coordinator,
-                                       supported_compilers(&try!(create_temp_dir())));
+                                       supported_compilers(&try!(create_temp_dir()), config.preprocess_batch));
     let files = args.iter()
         .filter(|a| !is_flag(a))
         .fold(Vec::new(), |state, a| expand_files(state, &a));

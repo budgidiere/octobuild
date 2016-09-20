@@ -560,7 +560,11 @@ mod test {
         for source in sources.iter() {
             wrapper.sources.insert(source.as_bytes());
         }
-        match super::filter_preprocessed(&mut Cursor::new(stream), &mut wrapper, true, marker, keep_headers) {
+        match super::filter_preprocessed(&mut Cursor::new(stream),
+                                         &mut wrapper,
+                                         true,
+                                         marker,
+                                         keep_headers) {
             Ok(_) => {
                 let actual = String::from_utf8_lossy(&wrapper.content);
                 if actual != expected.replace("\n", eol) {

@@ -18,9 +18,9 @@ use std::iter::FromIterator;
 use std::path::Path;
 use std::sync::Arc;
 
-pub fn supported_compilers(temp_dir: &Arc<TempDir>) -> CompilerGroup {
+pub fn supported_compilers(temp_dir: &Arc<TempDir>, preprocess_batch: usize) -> CompilerGroup {
     CompilerGroup::new()
-        .add(VsCompiler::new(&temp_dir))
+        .add(VsCompiler::new(&temp_dir, preprocess_batch))
         .add(ClangCompiler::new())
 }
 
