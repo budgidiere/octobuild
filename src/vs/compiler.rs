@@ -26,6 +26,60 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 use std::thread;
 
+// https://msdn.microsoft.com/en-us/library/windows/desktop/ms682425(v=vs.85).aspx
+const MAX_COMMAND_LINE: usize = 0x8000;
+// https://msdn.microsoft.com/en-us/library/windows/desktop/aa365247(v=vs.85).aspx
+const MAX_PATH: usize = 260;
+// Maximum allowed directly passed arguments. In other case we use save command arguments to file.
+// We use 75% of theoretical maximum, because make_command_line make be little differ then
+// Rust implementation (see: https://github.com/rust-lang/rust/blob/master/src/libstd/sys/windows/process.rs)
+const MAX_ARGUMENT_SIZE: usize = (MAX_COMMAND_LINE - MAX_PATH) * 75 / 100;
+const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+
+struct VsArgs {
+    args: Vec<String>,
+}
+
+impl VsArgs {
+    fn new() -> Self {
+        VsArgs { args: Vec::new() }
+    }
+
+    fn arg<S: Into<String>>(&mut self, value: S) -> &mut Self {
+        self.args.push(value.into());
+        self
+    }
+
+    fn args(&mut self, values: &[String]) -> &mut Self {
+        for value in values.iter() {
+            self.args.push(value.clone());
+        }
+        self
+    }
+
+    fn wrap<T, F>(&self, temp_dir: &Path, mut command: Command, func: F) -> Result<T, Error>
+        where F: FnOnce(Command) -> Result<T, Error>
+    {
+        let cmd_args = make_command_line(&self.args);
+        if cmd_args.len() < MAX_ARGUMENT_SIZE {
+            command.args(&self.args);
+            func(command)
+        } else {
+            let args_temp = TempFile::new_in(temp_dir, ".txt");
+            try!(File::create(args_temp.path()).and_then(|mut s| {
+                try!(s.write(&BOM));
+                try!(s.write(cmd_args.as_bytes()));
+                try!(s.write(b"\n"));
+                Ok(())
+            }));
+            command.arg("@".to_string() + args_temp.path().to_str().unwrap());
+            let result = func(command);
+            drop(args_temp);
+            result
+        }
+    }
+}
+
 pub struct VsCompiler {
     temp_dir: Arc<TempDir>,
     toolchains: ToolchainHolder,
@@ -193,7 +247,14 @@ impl Toolchain for VsToolchain {
                        worker: &Fn(&Path, PreprocessResult) -> Result<(), Error>)
                        -> Result<(), Error> {
         // Make parameters list for preprocessing.
-        let mut args = filter(&task.shared.args, |arg: &Arg| -> Option<String> {
+        let mut args = VsArgs::new();
+        // Add preprocessor paramters.
+        args
+            .arg("/nologo")
+            .arg("/T".to_string() + &task.language)
+            .arg("/E")
+            .arg("/we4002") // C4002: too many actual parameters for macro 'identifier'
+        .args(&filter(&task.shared.args, |arg: &Arg| -> Option<String> {
             match arg {
                 &Arg::Flag { ref scope, ref flag } => {
                     match scope {
@@ -212,20 +273,16 @@ impl Toolchain for VsToolchain {
                 &Arg::Input { .. } => None,
                 &Arg::Output { .. } => None,
             }
-        });
+        }))
+            .arg(join_flag("/Fo", &task.output_object));
 
-        // Add preprocessor paramters.
-        args.push("/nologo".to_string());
-        args.push("/T".to_string() + &task.language);
-        args.push("/E".to_string());
-        args.push("/we4002".to_string()); // C4002: too many actual parameters for macro 'identifier'
-
-        let mut command = task.shared
-            .command
-            .to_command();
-        command.args(&args)
-            .arg(&join_flag("/Fo", &task.output_object)); // /Fo option also set output path for #import directive
-        state.wrap_slow(|| execute(command, &task, worker))
+        state.wrap_slow(|| {
+            execute(task.shared.command.to_command(),
+                    args,
+                    self.temp_dir.path(),
+                    &task,
+                    worker)
+        })
     }
 
     // Compile preprocessed file.
@@ -278,11 +335,7 @@ impl Toolchain for VsToolchain {
         // Run compiler.
         let mut command = Command::new(&self.path);
         command.env_clear()
-            .current_dir(self.temp_dir.path())
-            .arg("/c")
-            .args(&task.args)
-            .arg(input_temp.path().to_str().unwrap())
-            .arg(&join_flag("/Fo", &output_object));
+            .current_dir(self.temp_dir.path());
         // Copy required environment variables.
         // todo: #15 Need to make correct PATH variable for cl.exe manually
         for (name, value) in vec!["SystemDrive", "SystemRoot", "TEMP", "TMP", "PATH"]
@@ -290,6 +343,11 @@ impl Toolchain for VsToolchain {
             .filter_map(|name| env::var(name).ok().map(|value| (name, value))) {
             command.env(name, value);
         }
+        let mut args = VsArgs::new();
+        args.arg("/c")
+            .args(&task.args)
+            .arg(input_temp.path().to_str().unwrap())
+            .arg(join_flag("/Fo", &output_object));
         // Output files.
         match &task.output_precompiled {
             &Some(ref path) => {
@@ -308,19 +366,21 @@ impl Toolchain for VsToolchain {
         match &task.input_precompiled {
             &Some(ref path) => {
                 assert!(path.is_absolute());
-                command.arg("/Yu");
-                command.arg(join_flag("/Fp", path));
+                args.arg("/Yu")
+                    .arg(join_flag("/Fp", path));
             }
             &None => {}
         }
         // Execute.
         state.wrap_slow(|| {
-            command.output().map(|o| {
-                OutputInfo {
-                    status: o.status.code(),
-                    stdout: prepare_output(temp_file, o.stdout.clone(), o.status.code() == Some(0)),
-                    stderr: o.stderr,
-                }
+            args.wrap(self.temp_dir.path(), command, |mut command| {
+                command.output().map(|o| {
+                    OutputInfo {
+                        status: o.status.code(),
+                        stdout: prepare_output(temp_file, o.stdout.clone(), o.status.code() == Some(0)),
+                        stderr: o.stderr,
+                    }
+                })
             })
         })
     }
@@ -354,7 +414,9 @@ fn get_output_object(input_source: &Path, output_object: &Path) -> Result<PathBu
     }
 }
 
-fn execute(mut command: Command,
+fn execute(command: Command,
+           mut args: VsArgs,
+           temp_dir: &Path,
            task: &CompilationTask,
            worker: &Fn(&Path, PreprocessResult) -> Result<(), Error>)
            -> Result<(), Error> {
@@ -376,14 +438,8 @@ fn execute(mut command: Command,
         // Local encoding
         Encoding::ANSI.to_bytes(&path_str).ok().map(|key| sources.insert(key, iter));
 
-        command.arg(path_str);
+        args.arg(path_str);
     }
-
-    let mut child = try!(command.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn());
-    drop(child.stdin.take());
 
     fn read_stderr<T: Read + Send + 'static>(stream: Option<T>) -> Receiver<Result<Vec<u8>, Error>> {
         let (tx, rx) = channel();
@@ -404,34 +460,43 @@ fn execute(mut command: Command,
         stream.recv().unwrap().unwrap_or(Vec::new())
     }
 
-    let rx_err = read_stderr(child.stderr.take());
-    let mut preprocessor = VsPreprocessor {
-        content: None,
-        pending: pending,
-        sources: sources,
-        worker: worker,
-    };
-    try!(postprocess::filter_preprocessed(&mut child.stdout.take().unwrap(),
-                                          &mut preprocessor,
-                                          task.shared.input_precompiled.is_some(),
-                                          &task.shared.marker_precompiled,
-                                          task.shared.output_precompiled.is_some()));
-    try!(preprocessor.exec());
+    args.wrap(temp_dir, command, |mut command| {
+        let mut child = try!(command.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn());
 
-    let status = try!(child.wait());
-    if !status.success() {
-        try!(worker(&task.input_sources[0],
-                    PreprocessResult::Failed(OutputInfo {
-                        status: status.code(),
-                        stdout: Vec::new(),
-                        stderr: bytes(rx_err),
-                    })));
-    }
-    if preprocessor.pending.len() > 0 {
-        return Err(Error::new(ErrorKind::Other,
-                              format!("Internal error. Unexpected preprocessor behaviour")));
-    }
-    Ok(())
+        drop(child.stdin.take());
+
+        let rx_err = read_stderr(child.stderr.take());
+        let mut preprocessor = VsPreprocessor {
+            content: None,
+            pending: pending,
+            sources: sources,
+            worker: worker,
+        };
+        try!(postprocess::filter_preprocessed(&mut child.stdout.take().unwrap(),
+                                              &mut preprocessor,
+                                              task.shared.input_precompiled.is_some(),
+                                              &task.shared.marker_precompiled,
+                                              task.shared.output_precompiled.is_some()));
+        try!(preprocessor.exec());
+
+        let status = try!(child.wait());
+        if !status.success() {
+            try!(worker(&task.input_sources[0],
+                        PreprocessResult::Failed(OutputInfo {
+                            status: status.code(),
+                            stdout: Vec::new(),
+                            stderr: bytes(rx_err),
+                        })));
+        }
+        if preprocessor.pending.len() > 0 {
+            return Err(Error::new(ErrorKind::Other,
+                                  format!("Internal error. Unexpected preprocessor behaviour")));
+        }
+        Ok(())
+    })
 }
 
 #[cfg(unix)]
@@ -580,6 +645,52 @@ fn join_flag(flag: &str, path: &Path) -> String {
     flag.to_string() + &path.to_str().unwrap()
 }
 
+// This function mostly copied from:
+// https://github.com/rust-lang/rust/blob/master/src/libstd/sys/windows/process.rs
+fn make_command_line(args: &[String]) -> String {
+    // Encode the command and arguments in a command line string such
+    // that the spawned process may recover them using CommandLineToArgvW.
+    let mut cmd: Vec<u8> = Vec::new();
+    for arg in args {
+        if cmd.len() > 0 {
+            cmd.push(' ' as u8);
+        }
+        append_arg(&mut cmd, arg);
+    }
+    return unsafe { String::from_utf8_unchecked(cmd) };
+
+    fn append_arg(cmd: &mut Vec<u8>, arg: &str) {
+        let arg_bytes = arg.as_bytes();
+        let quote = arg_bytes.iter().any(|c| *c == b' ' || *c == b'\t') || arg_bytes.is_empty();
+        if quote {
+            cmd.push(b'"');
+        }
+
+        let mut backslashes: usize = 0;
+        for x in arg.as_bytes().iter() {
+            if *x == b'\\' {
+                backslashes += 1;
+            } else {
+                if *x == b'"' {
+                    // Add n+1 backslashes to total 2n+1 before internal '"'.
+                    for _ in 0..(backslashes + 1) {
+                        cmd.push(b'\\');
+                    }
+                }
+                backslashes = 0;
+            }
+            cmd.push(*x);
+        }
+
+        if quote {
+            // Add n backslashes to total 2n before ending '"'.
+            for _ in 0..backslashes {
+                cmd.push(b'\\');
+            }
+            cmd.push(b'"');
+        }
+    }
+}
 
 #[cfg(test)]
 mod test {
