@@ -19,6 +19,7 @@ extern crate rand;
 extern crate regex;
 extern crate rustc_serialize;
 extern crate tempdir;
+extern crate thread_local;
 extern crate time;
 extern crate uuid;
 #[cfg(windows)]

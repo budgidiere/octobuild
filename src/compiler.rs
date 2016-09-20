@@ -3,7 +3,9 @@ use capnp;
 use crypto::digest::Digest;
 use crypto::md5::Md5;
 use ipc::Semaphore;
+use thread_local::ThreadLocal;
 
+use std::cell::Cell;
 use std::cmp::max;
 use std::collections::HashMap;
 use std::collections::hash_map;
@@ -158,6 +160,7 @@ pub struct SharedState {
     pub semaphore: Semaphore,
     pub cache: Cache,
     pub statistic: Statistic,
+    pub semaphore_cnt: ThreadLocal<Cell<bool>>,
 }
 
 pub struct CompilerGroup(Vec<Box<Compiler>>);
@@ -169,14 +172,22 @@ impl SharedState {
                 .expect("Can't create semaphore for limit CPU usage"),
             statistic: Statistic::new(),
             cache: Cache::new(&config),
+            semaphore_cnt: ThreadLocal::new(),
         }
     }
 
     pub fn wrap_slow<T, F: FnOnce() -> T>(&self, func: F) -> T {
-        let guard = self.semaphore.access();
-        let result = func();
-        drop(guard);
-        result
+        let is_reentrant = self.semaphore_cnt.get_or(|| Box::new(Cell::new(false)));
+        if is_reentrant.get() {
+            func()
+        } else {
+            is_reentrant.set(true);
+            let guard = self.semaphore.access();
+            let result = func();
+            drop(guard);
+            is_reentrant.set(false);
+            result
+        }
     }
 }
 
