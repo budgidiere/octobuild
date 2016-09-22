@@ -55,6 +55,8 @@ pub mod xg {
     pub mod parser;
 }
 pub mod vs {
+    #[cfg(windows)]
+    pub mod c2;
     pub mod compiler;
     pub mod prepare;
     pub mod postprocess;
