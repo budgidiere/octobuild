@@ -11,6 +11,9 @@ debug = true
 panic = "abort"
 debug = true
 
+[lib]
+crate-type = ["lib", "cdylib"]
+
 [[bin]]
 name = "octo_builder"
 
