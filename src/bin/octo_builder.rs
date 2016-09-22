@@ -31,7 +31,7 @@ use crypto::md5::Md5;
 use nickel::{HttpRouter, ListeningServer, MediaType, Middleware, MiddlewareResult, Nickel, NickelError, Request,
              Response};
 use nickel::status::StatusCode;
-use nickel::method::Method;
+use hyper::method::Method;
 use rustc_serialize::json;
 use rustc_serialize::hex::FromHex;
 use tempdir::TempDir;
