@@ -1,5 +1,5 @@
 # See http://blog.airesoft.co.uk/2013/01/
-C2=/B2 C:\Work\github\octobuild\target\debug\octobuild.dll
+C2=/B2 ..\..\target\debug\octobuild.dll
 
 all: sample.cpp.o
 

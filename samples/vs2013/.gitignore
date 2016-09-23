@@ -1,3 +1,4 @@
+cache/
 *.cpp.i
 *.cpp.o
 *.h.i

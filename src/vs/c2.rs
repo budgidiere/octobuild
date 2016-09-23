@@ -2,15 +2,22 @@
 extern crate winapi;
 extern crate kernel32;
 
+use crypto::digest::Digest;
+use crypto::md5::Md5;
+
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::ffi::OsStrExt;
 use std::env;
-use std::ffi::{CString, OsString};
+use std::ffi::{CString, OsStr, OsString};
 use std::io::{Error, ErrorKind};
 use std::mem;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::slice;
+
+use ::cache::FileHasher;
+use ::config::Config;
+use ::compiler::{Hasher, OutputInfo, SharedState};
 
 pub struct Library {
     handle: winapi::HMODULE,
@@ -20,6 +27,13 @@ pub struct Library {
 pub struct LibraryC2 {
     invoke_compiler_pass: FnInvokeCompilerPass,
     abort_compiler_pass: FnAbortCompilerPass,
+}
+
+#[derive(Debug)]
+pub struct BackendTask {
+    inputs: Vec<PathBuf>,
+    output: PathBuf,
+    params: Vec<OsString>,
 }
 
 #[cfg(target_pointer_width = "32")]
@@ -68,6 +82,7 @@ pub extern "stdcall" fn invoke_compiler_pass_extern(argc: winapi::DWORD,
 pub extern "stdcall" fn abort_compiler_pass_extern(how: winapi::DWORD) {
     abort_compiler_pass(how)
 }
+
 #[cfg(target_pointer_width = "64")]
 #[export_name = "AbortCompilerPass"]
 pub extern "stdcall" fn abort_compiler_pass_extern(how: winapi::DWORD) {
@@ -84,10 +99,8 @@ fn invoke_compiler_pass(argc: winapi::DWORD,
     for i in 0..argc {
         args.push(unsafe { OsString::from_wide_ptr(argv_slice[i as usize]) });
     }
-    println!("EXE: {:?}\n{:?}", env::current_exe(), args);
-    invoke_compiler_pass_wrapper(&[], || {
-        (c2().invoke_compiler_pass)(argc, argv, unknown, cluimod)
-    })
+    invoke_compiler_pass_wrapper(args,
+                                 || (singleton_c2().invoke_compiler_pass)(argc, argv, unknown, cluimod))
 }
 
 extern "stdcall" fn invoke_compiler_pass_fallback(_: winapi::DWORD,
@@ -100,13 +113,112 @@ extern "stdcall" fn invoke_compiler_pass_fallback(_: winapi::DWORD,
     return 0xFF;
 }
 
-fn invoke_compiler_pass_wrapper<F>(args: &[OsString], original: F) -> u32
+fn generate_hash(state: &SharedState, task: &BackendTask) -> Result<String, Error> {
+    let mut hasher = Md5::new();
+    // Hash parameters
+    hasher.hash_u64(task.params.len() as u64);
+    for iter in task.params.iter() {
+        hash_os_str(&mut hasher, &iter);
+    }
+    // Hash input files
+    hasher.hash_u64(task.inputs.len() as u64);
+    for path in task.inputs.iter() {
+        hasher.hash_bytes(try!(state.cache.file_hash(&path)).hash.as_bytes());
+    }
+    Ok(hasher.result_str())
+}
+
+fn hash_os_str<H: Hasher>(hasher: &mut H, value: &OsStr) {
+    hasher.hash_u64(value.len() as u64);
+    for i in value.encode_wide() {
+        hasher.hash_bytes(&[(i & 0xFF) as u8, ((i >> 8) & 0xFF) as u8]);
+    }
+}
+
+fn invoke_compiler_pass_wrapper<F>(args: Vec<OsString>, original: F) -> u32
     where F: FnOnce() -> u32
 {
-    println!("BEGIN");
-    let r = original();
-    println!("END");
-    r
+    match prepare_task(args) {
+        Ok(task) => {
+            let state = match singleton_state() {
+                Some(v) => v,
+                None => {
+                    error!("FATAL ERROR: Can't initialize octobuild");
+                    return original();
+                }
+            };
+            let hash = match generate_hash(&state, &task) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("Can't generate hash for compilation task: {}", e);
+                    return original();
+                }
+            };
+            match state.cache.run_file_cached(&state.statistic,
+                                              &hash,
+                                              &vec![task.output],
+                                              || -> Result<OutputInfo, Error> {
+                Ok(OutputInfo {
+                    status: Some(original() as i32),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })
+            },                                              || true) {
+                Ok(output) => output.status.unwrap() as u32,
+                Err(e) => {
+                    warn!("Can't run original backend with cache: {}", e);
+                    0xFE
+                }
+            }
+        }
+        Err(e) => {
+            info!("Can't use octobuild for task: {}", e);
+            original()
+        }
+    }
+}
+
+fn prepare_task(args: Vec<OsString>) -> Result<BackendTask, String> {
+    let mut inputs = Vec::new();
+    let mut output = None;
+    let mut params = Vec::new();
+    let mut iter = args.into_iter();
+    // Skip program name
+    if iter.next().is_none() {
+        return Err("Empty arguments list".to_string());
+    }
+    loop {
+        let arg = match iter.next() {
+            Some(v) => v,
+            None => break,
+        };
+        if arg == OsStr::new("-il") {
+            let base = try!(iter.next().ok_or("Can't get -il key value".to_string()));
+            for suffix in ["db", "ex", "gl", "in"].iter() {
+                let mut path = base.clone();
+                path.push(OsStr::new(suffix));
+                inputs.push(Path::new(path.as_os_str()).to_path_buf());
+            }
+            continue;
+        }
+        let vec = arg.encode_wide().collect::<Vec<_>>();
+        if vec.starts_with(&['-' as u16, 'F' as u16, 'o' as u16]) {
+            if output.is_some() {
+                return Err("Multiple output files is not supported".to_string());
+            }
+            output = Some(Path::new(OsString::from_wide(&vec[3..]).as_os_str()).to_path_buf());
+            continue;
+        }
+        params.push(arg);
+    }
+    if inputs.is_empty() {
+        return Err("Don't find input file list".to_string());
+    }
+    Ok(BackendTask {
+        inputs: inputs,
+        output: try!(output.ok_or("Don't find output file name".to_string())),
+        params: params,
+    })
 }
 
 pub trait OsStringExt2 {
@@ -129,10 +241,10 @@ impl OsStringExt2 for OsString {
 }
 
 fn abort_compiler_pass(how: winapi::DWORD) {
-    (c2().abort_compiler_pass)(how)
+    (singleton_c2().abort_compiler_pass)(how)
 }
 
-extern "stdcall" fn abort_compiler_pass_fallback(how: winapi::DWORD) {
+extern "stdcall" fn abort_compiler_pass_fallback(_: winapi::DWORD) {
     error!("Can't find function in C2.dll compiler: {}",
            ABORT_COMPILER_PASS_NAME);
 }
@@ -205,13 +317,33 @@ impl LibraryC2 {
     }
 }
 
-fn c2() -> &'static LibraryC2 {
+fn singleton_c2() -> &'static LibraryC2 {
+    fn create() -> LibraryC2 {
+        env::current_exe()
+            .map(|path| LibraryC2::load(&path.with_file_name("c2.dll"), false))
+            .unwrap_or_else(|_| LibraryC2::fallback())
+    }
     lazy_static! {
-		static ref L: LibraryC2  = env::current_exe()
-		.map(|path| LibraryC2::load(& path.with_file_name("c2.dll"), false)		)
-		.unwrap_or_else(|_| LibraryC2::fallback());
+		static ref SINGLETON: LibraryC2  =create() ;
 	}
-    &L
+    &SINGLETON
+}
+
+fn singleton_state() -> Option<&'static SharedState> {
+    fn create() -> Option<SharedState> {
+        let config = match Config::new() {
+            Ok(v) => v,
+            Err(e) => {
+                return None;
+            }
+        };
+        Some(SharedState::new(&config))
+    }
+
+    lazy_static! {
+		static ref SINGLETON:  Option<SharedState>  = create();
+	}
+    SINGLETON.as_ref()
 }
 
 #[cfg(test)]

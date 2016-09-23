@@ -516,7 +516,7 @@ impl Compiler for CompilerGroup {
     }
 }
 
-trait Hasher: Digest {
+pub trait Hasher: Digest {
     fn hash_u64(&mut self, number: u64) {
         let mut n = number;
         let mut buf: [u8; 8] = [0; 8];
