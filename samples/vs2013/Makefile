@@ -1,19 +1,14 @@
-all: sample.cpp.o precompiled.cpp.i
+# See http://blog.airesoft.co.uk/2013/01/
+C2=/B2 C:\Work\github\octobuild\target\debug\octobuild.dll
+
+all: sample.cpp.o
 
 clean:
 	del *.h.pch
-	del *.h.i
-	del *.cpp.i
 	del *.cpp.o
 
 sample.h.pch: sample.h
-	cl /c /Ycsample.h /Fpsample.h.pch /Foprecompiled.cpp.o precompiled.cpp
+	cl /c /Bd /Bt /Bk $(C2) /DFOO=1 /D BAR=2 /Ycsample.h /Fpsample.h.pch /Foprecompiled.cpp.o precompiled.cpp
 
-precompiled.cpp.i: precompiled.cpp
-	cl /P /Fiprecompiled.cpp.i precompiled.cpp
-
-sample.cpp.i: sample.cpp sample.h.pch
-	cl /P /Yusample.h.pch /Fisample.cpp.i sample.cpp
-
-sample.cpp.o: sample.cpp.i
-	cl /c /Yusample.h /Fpsample.h.pch /Fosample.cpp.o sample.cpp
+sample.cpp.o: sample.cpp sample.h.pch
+	cl /c /Bd /Bt /Bk $(C2) /DFOO=1 /D BAR=2 /Yusample.h /Fpsample.h.pch /Fosample.cpp.o sample.cpp

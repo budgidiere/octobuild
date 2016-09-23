@@ -1,2 +1,2 @@
-@call "%VS120COMNTOOLS%\vsvars32.bat"
+@call "%VS120COMNTOOLS%\..\..\VC\vcvarsall.bat" amd64
 nmake clean all
