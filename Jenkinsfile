@@ -16,7 +16,7 @@ wine reg add "HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList
 */
 rustVersion = "1.11.0"
 
-def TAG_NAME = binding.variables.get("TAG_NAME")
+def TAG_NAME = getParameter("TAG_NAME")
 if (TAG_NAME != null) {
   echo "Build tag: $TAG_NAME"
 }
@@ -175,7 +175,7 @@ done
     stage ("Publish: dist.bozaro.ru") {
       sshagent(credentials: ['0d1e35cd-a719-4ab9-afed-fb5d9c8ff9af']) {
         sh """
-scp -B -o StrictHostKeyChecking=no target/*.msi deploy@dist.bozaro.ru:dist.bozaro.ru/htdocs/windows/
+scp -B -o StrictHostKeyChecking=no target/*.msi deploy@dist.bozaro.ru:dist.bozaro.ru/windows/
 scp -B -o StrictHostKeyChecking=no target/*.dsc target/*.tar.gz target/*.deb target/*.changes deploy@dist.bozaro.ru:incoming/
 """
       }
@@ -206,5 +206,13 @@ void withRustEnv(List envVars = [], def body) {
   // Invoke the body closure we're passed within the environment we've created.
   withEnv(jobEnv) {
     body.call()
+  }
+}
+
+String getParameter(String name) {
+  try {
+    return getProperty(name);
+  } catch (MissingPropertyException e) {
+    return null;
   }
 }
