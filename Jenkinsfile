@@ -77,62 +77,66 @@ popd
     }
   }
 },
-'Win32': windowsBuild('Win32', 'i686'),
-'Win64': windowsBuild('Win64', 'x86_64')
+'Windows': {
+  node ('linux') {
+    def PLATFORMS = ["i686", "x86_64"]
 
-def windowsBuild(String stageName, String arch) {
-  return {
-    node ('linux') {
-      stage ("$stageName: Checkout") {
-        checkout scm
-        sh "git reset --hard"
-        sh "git clean -ffdx"
-      }
+    stage ("Windows: Checkout") {
+      checkout scm
+      sh "git reset --hard"
+      sh "git clean -ffdx"
+    }
 
-      stage ("$stageName: Prepare rust") {
-        withRustEnv {
-          sh "rustup self update"
-          sh "rustup toolchain install $rustVersion"
-          sh "rustup override add $rustVersion"
+    stage ("Windows: Prepare rust") {
+      withRustEnv {
+        sh "rustup self update"
+        sh "rustup toolchain install $rustVersion"
+        sh "rustup override add $rustVersion"
+        for (String arch : PLATFORMS) {
           sh "rustup target add $arch-pc-windows-gnu"
         }
       }
+    }
 
-      stage ("$stageName: Build") {
+    for (String arch : PLATFORMS) {
+      stage ("Windows: Build ($arch)") {
         withRustEnv {
           sh "cargo build --release --target $arch-pc-windows-gnu"
         }
-        withCredentials([[$class: 'FileBinding', credentialsId: '54b693ef-b304-4d3d-a53b-6efd64dd76f4', variable: 'PEM_FILE']]) {
-          sh """
-for i in target/$arch-pc-windows-gnu/release/*.exe; do
-  osslsigncode sign -certs "\$PEM_FILE" -key "\$PEM_FILE" -in \$i -h sha256 -t http://timestamp.verisign.com/scripts/timstamp.dll -out \$i.signed && mv \$i.signed \$i
+      }
+    }
+
+    stage ("Windows: Sign") {
+      withCredentials([[$class: 'FileBinding', credentialsId: '54b693ef-b304-4d3d-a53b-6efd64dd76f4', variable: 'PEM_FILE']]) {
+        sh """
+for i in target/*-pc-windows-*/release/*.(exe|dll); do
+osslsigncode sign -certs "\$PEM_FILE" -key "\$PEM_FILE" -in \$i -h sha256 -t http://timestamp.verisign.com/scripts/timstamp.dll -out \$i.signed && mv \$i.signed \$i
 done
 """
-        }
       }
+    }
 
-      stage ("$stageName: Installer") {
-        sh "7z x -y -otarget/wixsharp/ .jenkins/distrib/WixSharp.1.0.35.0.7z"
-        withEnv([
-          'WIXSHARP_DIR=Z:$WORKSPACE/target/wixsharp',
-          'WIXSHARP_WIXDIR=Z:$WORKSPACE/target/wixsharp/Wix_bin/bin',
-        ]) {
-          sh """
+    stage ("Windows: Installer") {
+      sh "7z x -y -otarget/wixsharp/ .jenkins/distrib/WixSharp.1.0.35.0.7z"
+      withEnv([
+        'WIXSHARP_DIR=Z:$WORKSPACE/target/wixsharp',
+        'WIXSHARP_WIXDIR=Z:$WORKSPACE/target/wixsharp/Wix_bin/bin',
+      ]) {
+        sh """
 export WORKSPACE="`pwd`"
 export WIXSHARP_DIR="Z:\$WORKSPACE/target/wixsharp"
 export WIXSHARP_WIXDIR="Z:\$WORKSPACE/target/wixsharp/Wix_bin/bin"
 wine target/wixsharp/cscs.exe wixcs/setup.cs
 """
-        }
-        withCredentials([[$class: 'FileBinding', credentialsId: '54b693ef-b304-4d3d-a53b-6efd64dd76f4', variable: 'PEM_FILE']]) {
-          sh """
+      }
+      withCredentials([[$class: 'FileBinding', credentialsId: '54b693ef-b304-4d3d-a53b-6efd64dd76f4', variable: 'PEM_FILE']]) {
+        sh """
 for i in target/*.msi; do
   osslsigncode sign -certs "\$PEM_FILE" -key "\$PEM_FILE" -in \$i -h sha256 -t http://timestamp.verisign.com/scripts/timstamp.dll -out \$i.signed && mv \$i.signed \$i
 done
 """
-        }
-        archive "target/*.msi"
       }
+      archive "target/*.msi"
     }
   }
 }
