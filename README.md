@@ -6,6 +6,13 @@
 
 This project allows you to cache the compilation on Unreal Engine building (like ccache).
 
+It speeds up recompilation by caching previous compilations and detecting when the same compilation is being done again.
+
+## Integration
+
+### Unreal Engine
+This project allows you to cache the compilation on Unreal Engine building (like ccache).
+
 It's supported out of box (you need simply install it):
 
  * Visual Studio UBT build on Windows;
@@ -13,7 +20,16 @@ It's supported out of box (you need simply install it):
 
 This program uses UBT extension point for IncrediBuild.
 
-It speeds up recompilation by caching previous compilations and detecting when the same compilation is being done again.
+### MSBuild
+You need to add lines to begin of prject file:
+```xml
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Condition="Exists('$(OCTOBUILD)/msbuild/octobuild.targets')" Project="$(OCTOBUILD)/msbuild/octobuild.targets" />
+  ...
+</Project>
+```
+
+In this case you will use octobuild only if it installed. Without installed octobuild you will have usual build.
 
 ## Installation
 
