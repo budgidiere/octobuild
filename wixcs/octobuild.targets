@@ -13,6 +13,7 @@
 
     <ItemDefinitionGroup>
         <ClCompile>
+            <DebugInformationFormat>OldStyle</DebugInformationFormat>
             <AdditionalOptions Condition="Exists('$(MSBuildThisFileDirectory)octobuild.$(PreferredToolArchitecture).dll')">/B2 "$(MSBuildThisFileDirectory)octobuild.$(PreferredToolArchitecture).dll" %(ClCompile.AdditionalOptions)</AdditionalOptions>
         </ClCompile>
     </ItemDefinitionGroup>
