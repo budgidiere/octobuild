@@ -109,7 +109,8 @@ popd
     stage ("Windows: Sign") {
       withCredentials([[$class: 'FileBinding', credentialsId: '54b693ef-b304-4d3d-a53b-6efd64dd76f4', variable: 'PEM_FILE']]) {
         sh """
-for i in target/*-pc-windows-*/release/*.(exe|dll); do
+for i in target/*-pc-windows-*/release/*.exe target/*-pc-windows-*/release/*.dll; do
+strip \$i
 osslsigncode sign -certs "\$PEM_FILE" -key "\$PEM_FILE" -in \$i -h sha256 -t http://timestamp.verisign.com/scripts/timstamp.dll -out \$i.signed && mv \$i.signed \$i
 done
 """
@@ -117,7 +118,7 @@ done
     }
 
     stage ("Windows: Installer") {
-      sh "7z x -y -otarget/wixsharp/ .jenkins/distrib/WixSharp.1.0.35.0.7z"
+      sh "7z x -y -otarget/wixsharp/ .jenkins/distrib/WixSharp.1.0.42.0.7z"
       withEnv([
         'WIXSHARP_DIR=Z:$WORKSPACE/target/wixsharp',
         'WIXSHARP_WIXDIR=Z:$WORKSPACE/target/wixsharp/Wix_bin/bin',
