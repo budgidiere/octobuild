@@ -201,6 +201,10 @@ fn prepare_task(args: Vec<OsString>) -> Result<BackendTask, String> {
             }
             continue;
         }
+        if arg == OsStr::new("-MPdiagMutex") {
+            try!(iter.next().ok_or("Can't get -MPdiagMutex key value".to_string()));
+            continue;
+        }
         let vec = arg.encode_wide().collect::<Vec<_>>();
         if vec.starts_with(&['-' as u16, 'F' as u16, 'o' as u16]) {
             if output.is_some() {
