@@ -63,13 +63,13 @@ class Script
 			new File(featureBuilder, @"target\x86_64-pc-windows-gnu\release\xgConsole.exe"),
 			new File(featureBuilder, @"LICENSE"),
 			new Dir(featureMSBuild, "msbuild", new WixEntity[] {
-				new File(@"target\x86_64-pc-windows-gnu\release\octobuild.dll") {
+				new File(featureMSBuild, @"target\x86_64-pc-windows-gnu\release\octobuild.dll") {
 					Attributes = new Dictionary<string,string> {{"Name" , "octobuild.x64.dll"}}
 				},
-				new File(@"target\i686-pc-windows-gnu\release\octobuild.dll") {
+				new File(featureMSBuild, @"target\i686-pc-windows-gnu\release\octobuild.dll") {
 					Attributes = new Dictionary<string,string> {{"Name" , "octobuild.x86.dll"}}
 				},
-				new File(@"wixcs\octobuild.targets"),
+				new File(featureMSBuild, @"wixcs\octobuild.targets"),
 			})
 		});
 
