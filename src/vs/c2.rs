@@ -163,7 +163,8 @@ fn invoke_compiler_pass_wrapper<F>(args: Vec<OsString>, original: F) -> u32
                     stdout: Vec::new(),
                     stderr: Vec::new(),
                 })
-            },                                              || true) {
+            },
+                                              || true) {
                 Ok(output) => output.status.unwrap() as u32,
                 Err(e) => {
                     warn!("Can't run original backend with cache: {}", e);
@@ -194,7 +195,11 @@ fn prepare_task(args: Vec<OsString>) -> Result<BackendTask, String> {
         };
         if arg == OsStr::new("-il") {
             let base = try!(iter.next().ok_or("Can't get -il key value".to_string()));
-            for suffix in ["db", "ex", "gl", "in"].iter() {
+            for suffix in [// "gl", "db",
+                           "ex",
+                           "in",
+                           "sy"]
+                .iter() {
                 let mut path = base.clone();
                 path.push(OsStr::new(suffix));
                 inputs.push(Path::new(path.as_os_str()).to_path_buf());
