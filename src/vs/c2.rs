@@ -259,7 +259,7 @@ extern "stdcall" fn abort_compiler_pass_fallback(_: winapi::DWORD) {
 }
 
 impl Library {
-    fn load(path: &Path, auto_unload: bool) -> Result<Self, Error> {
+    pub fn load(path: &Path, auto_unload: bool) -> Result<Self, Error> {
         let handle = unsafe {
             kernel32::LoadLibraryW(path.as_os_str()
                 .encode_wide()
@@ -277,7 +277,7 @@ impl Library {
         }
     }
 
-    fn lookup(&self, name: &str) -> Result<usize, Error> {
+    pub fn lookup(&self, name: &str) -> Result<usize, Error> {
         unsafe {
             let address = kernel32::GetProcAddress(self.handle, try!(CString::new(name)).as_ptr());
             if address == ptr::null_mut() {
@@ -353,23 +353,4 @@ fn singleton_state() -> Option<&'static SharedState> {
 		static ref SINGLETON:  Option<SharedState>  = create();
 	}
     SINGLETON.as_ref()
-}
-
-#[cfg(test)]
-fn check_function_exists<F>(name: &str, _: F) {
-    let library_path = env::current_exe().unwrap().with_file_name("octobuild.dll");
-    println!("Check function {} for library {:?}", name, library_path);
-    assert!(library_path.is_file());
-    let library = Library::load(&library_path, true).unwrap();
-    assert!(library.lookup(name).is_ok());
-}
-
-#[test]
-fn test_invoke_compiler_pass_exists() {
-    check_function_exists::<FnInvokeCompilerPass>(INVOKE_COMPILER_PASS_NAME, invoke_compiler_pass_extern)
-}
-
-#[test]
-fn test_abort_compiler_pass_exists() {
-    check_function_exists::<FnAbortCompilerPass>(ABORT_COMPILER_PASS_NAME, abort_compiler_pass_extern)
 }

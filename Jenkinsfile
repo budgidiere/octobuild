@@ -102,6 +102,7 @@ popd
       stage ("Windows: Build ($arch)") {
         withRustEnv {
           sh "cargo build --release --target $arch-pc-windows-gnu"
+          sh "wine target/$arch-pc-windows-gnu/release/test_c2.exe"
         }
       }
     }

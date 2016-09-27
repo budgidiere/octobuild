@@ -32,6 +32,9 @@ name = "xgConsole"
 [[bin]]
 name = "filter_cl"
 
+[[bin]]
+name = "test_c2"
+
 [build-dependencies]
 capnpc = "0.7.2"
 rustc_version = "0.1.7"
