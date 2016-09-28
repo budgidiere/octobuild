@@ -34,6 +34,7 @@ parallel 'Linux': {
         sh "rustup self update"
         sh "rustup toolchain install $rustVersion"
         sh "rustup override add $rustVersion"
+        sh "cargo -V && rustc -V"
       }
     }
 
@@ -95,6 +96,7 @@ popd
         for (String arch : PLATFORMS) {
           sh "rustup target add $arch-pc-windows-gnu"
         }
+        sh "cargo -V && rustc -V"
       }
     }
 
