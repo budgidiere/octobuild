@@ -1,19 +1,24 @@
 /** This binary used for testing ocobuild.dll function export names on Linux with Wine.
 */
 extern crate octobuild;
+extern crate libloading;
 
 #[cfg(windows)]
 use octobuild::vs::c2::*;
 
 #[cfg(windows)]
-fn check_function_exists<F>(name: &str, _: F) {
+fn check_function_exists<F>(name: &[u8], _: F) {
     use std::env;
+    use libloading::Library;
 
     let library_path = env::current_exe().unwrap().with_file_name("octobuild.dll");
-    println!("Check function {} for library {:?}", name, library_path);
+    println!("Check function {} for library {:?}",
+             String::from_utf8_lossy(name),
+             library_path);
     assert!(library_path.is_file());
-    let library = Library::load(&library_path, true).unwrap();
-    assert!(library.lookup(name).is_ok());
+
+    let lib = Library::new(library_path).unwrap();
+    assert!(unsafe { lib.get::<F>(name) }.is_ok());
 }
 
 #[cfg(windows)]
@@ -23,8 +28,7 @@ fn main() {
 }
 
 #[cfg(not(windows))]
-fn main() {
-}
+fn main() {}
 
 #[cfg(windows)]
 #[test]

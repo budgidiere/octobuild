@@ -4,30 +4,19 @@ extern crate kernel32;
 
 use crypto::digest::Digest;
 use crypto::md5::Md5;
+use libloading::Library;
 
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::ffi::OsStrExt;
 use std::env;
-use std::ffi::{CString, OsStr, OsString};
+use std::ffi::{OsStr, OsString};
 use std::io::{Error, ErrorKind};
-use std::mem;
 use std::path::{Path, PathBuf};
-use std::ptr;
 use std::slice;
 
 use ::cache::FileHasher;
 use ::config::Config;
 use ::compiler::{Hasher, OutputInfo, SharedState};
-
-pub struct Library {
-    handle: winapi::HMODULE,
-    auto_unload: bool,
-}
-
-pub struct LibraryC2 {
-    invoke_compiler_pass: FnInvokeCompilerPass,
-    abort_compiler_pass: FnAbortCompilerPass,
-}
 
 #[derive(Debug)]
 pub struct BackendTask {
@@ -37,16 +26,16 @@ pub struct BackendTask {
 }
 
 #[cfg(target_pointer_width = "32")]
-pub const INVOKE_COMPILER_PASS_NAME: &'static str = "_InvokeCompilerPassW@16";
+pub const INVOKE_COMPILER_PASS_NAME: &'static [u8] = b"_InvokeCompilerPassW@16";
 
 #[cfg(target_pointer_width = "64")]
-pub const INVOKE_COMPILER_PASS_NAME: &'static str = "InvokeCompilerPassW";
+pub const INVOKE_COMPILER_PASS_NAME: &'static [u8] = b"InvokeCompilerPassW";
 
 #[cfg(target_pointer_width = "32")]
-pub const ABORT_COMPILER_PASS_NAME: &'static str = "_AbortCompilerPass@4";
+pub const ABORT_COMPILER_PASS_NAME: &'static [u8] = b"_AbortCompilerPass@4";
 
 #[cfg(target_pointer_width = "64")]
-pub const ABORT_COMPILER_PASS_NAME: &'static str = "AbortCompilerPass";
+pub const ABORT_COMPILER_PASS_NAME: &'static [u8] = b"AbortCompilerPass";
 
 pub type FnInvokeCompilerPass = extern "stdcall" fn(winapi::DWORD,
                                                     *mut winapi::LPCWSTR,
@@ -99,18 +88,17 @@ fn invoke_compiler_pass(argc: winapi::DWORD,
     for i in 0..argc {
         args.push(unsafe { OsString::from_wide_ptr(argv_slice[i as usize]) });
     }
-    invoke_compiler_pass_wrapper(args,
-                                 || (singleton_c2().invoke_compiler_pass)(argc, argv, unknown, cluimod))
-}
-
-extern "stdcall" fn invoke_compiler_pass_fallback(_: winapi::DWORD,
-                                                  _: *mut winapi::LPCWSTR,
-                                                  _: winapi::DWORD,
-                                                  _: *const winapi::HMODULE)
-                                                  -> winapi::DWORD {
-    error!("Can't find function in C2.dll compiler: {}",
-           INVOKE_COMPILER_PASS_NAME);
-    return 0xFF;
+    invoke_compiler_pass_wrapper(args, || {
+        singleton_c2()
+            .and_then(|lib| unsafe { lib.get::<FnInvokeCompilerPass>(INVOKE_COMPILER_PASS_NAME) })
+            .map(|func| (func)(argc, argv, unknown, cluimod))
+            .unwrap_or_else(|e| {
+                error!("Can't execute original function {}: {}",
+                       String::from_utf8_lossy(INVOKE_COMPILER_PASS_NAME),
+                       e);
+                0xFFFE
+            })
+    })
 }
 
 fn generate_hash(state: &SharedState, task: &BackendTask) -> Result<String, Error> {
@@ -250,92 +238,28 @@ impl OsStringExt2 for OsString {
 }
 
 fn abort_compiler_pass(how: winapi::DWORD) {
-    (singleton_c2().abort_compiler_pass)(how)
+    singleton_c2()
+        .and_then(|lib| unsafe { lib.get::<FnAbortCompilerPass>(ABORT_COMPILER_PASS_NAME) })
+        .map(|func| (func)(how))
+        .unwrap_or_else(|e| {
+            info!("Can't execute original function {}: {}",
+                  String::from_utf8_lossy(ABORT_COMPILER_PASS_NAME),
+                  e);
+        })
 }
 
-extern "stdcall" fn abort_compiler_pass_fallback(_: winapi::DWORD) {
-    error!("Can't find function in C2.dll compiler: {}",
-           ABORT_COMPILER_PASS_NAME);
-}
-
-impl Library {
-    pub fn load(path: &Path, auto_unload: bool) -> Result<Self, Error> {
-        let handle = unsafe {
-            kernel32::LoadLibraryW(path.as_os_str()
-                .encode_wide()
-                .chain(Some(0))
-                .collect::<Vec<_>>()
-                .as_ptr())
-        };
-        if handle == ptr::null_mut() {
-            Err(Error::last_os_error())
-        } else {
-            Ok(Library {
-                handle: handle,
-                auto_unload: auto_unload,
-            })
-        }
+fn singleton_c2() -> Result<&'static Library, Error> {
+    fn path() -> PathBuf {
+        env::current_exe().map(|path| path.with_file_name("c2.dll")).unwrap()
     }
-
-    pub fn lookup(&self, name: &str) -> Result<usize, Error> {
-        unsafe {
-            let address = kernel32::GetProcAddress(self.handle, try!(CString::new(name)).as_ptr());
-            if address == ptr::null_mut() {
-                Err(Error::new(ErrorKind::NotFound, name))
-            } else {
-                Ok(address as usize)
-            }
-        }
-    }
-}
-
-unsafe impl Sync for Library {}
-
-impl Drop for Library {
-    fn drop(&mut self) {
-        if self.auto_unload {
-            unsafe {
-                kernel32::FreeLibrary(self.handle);
-            }
-        }
-    }
-}
-
-impl LibraryC2 {
-    fn load(path: &Path, auto_unload: bool) -> Self {
-        Library::load(path, auto_unload)
-            .map(|library| {
-                let fallback = LibraryC2::fallback();
-                LibraryC2 {
-                    invoke_compiler_pass: library.lookup(INVOKE_COMPILER_PASS_NAME)
-                        .map(|addr| unsafe { mem::transmute::<usize, FnInvokeCompilerPass>(addr) })
-                        .unwrap_or(fallback.invoke_compiler_pass),
-                    abort_compiler_pass: library.lookup(ABORT_COMPILER_PASS_NAME)
-                        .map(|addr| unsafe { mem::transmute::<usize, FnAbortCompilerPass>(addr) })
-                        .unwrap_or(fallback.abort_compiler_pass),
-                }
-            })
-            .unwrap_or_else(|_| LibraryC2::fallback())
-    }
-
-    fn fallback() -> Self {
-        LibraryC2 {
-            invoke_compiler_pass: invoke_compiler_pass_fallback,
-            abort_compiler_pass: abort_compiler_pass_fallback,
-        }
-    }
-}
-
-fn singleton_c2() -> &'static LibraryC2 {
-    fn create() -> LibraryC2 {
-        env::current_exe()
-            .map(|path| LibraryC2::load(&path.with_file_name("c2.dll"), false))
-            .unwrap_or_else(|_| LibraryC2::fallback())
+    fn create() -> Option<Library> {
+        Library::new(path()).ok()
     }
     lazy_static! {
-		static ref SINGLETON: LibraryC2  =create() ;
+		static ref SINGLETON: Option<Library> =create() ;
 	}
-    &SINGLETON
+    SINGLETON.as_ref().ok_or(Error::new(ErrorKind::NotFound,
+                                        format!("Can't load shared library: {:?}", path())))
 }
 
 fn singleton_state() -> Option<&'static SharedState> {
@@ -343,6 +267,7 @@ fn singleton_state() -> Option<&'static SharedState> {
         let config = match Config::new() {
             Ok(v) => v,
             Err(e) => {
+                error!("Can't create shared state: {:?}", e);
                 return None;
             }
         };

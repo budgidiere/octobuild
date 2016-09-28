@@ -20,6 +20,7 @@ extern crate rand;
 extern crate petgraph;
 extern crate regex;
 extern crate ipc;
+extern crate libloading;
 #[cfg(windows)]
 extern crate winapi;
 
