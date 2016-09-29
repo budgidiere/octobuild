@@ -183,7 +183,7 @@ fn prepare_task(args: Vec<OsString>) -> Result<BackendTask, String> {
         };
         if arg == OsStr::new("-il") {
             let base = try!(iter.next().ok_or("Can't get -il key value".to_string()));
-            for suffix in [// "gl", "db",
+            for suffix in [// "gl", "db", // todo #22
                            "ex",
                            "in",
                            "sy"]
