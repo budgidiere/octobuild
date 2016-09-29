@@ -3,7 +3,7 @@ extern crate filetime;
 
 use std::cmp::min;
 use std::fmt::{Display, Formatter};
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
@@ -166,10 +166,9 @@ fn write_cache(statistic: &Statistic, path: &Path, paths: &Vec<PathBuf>, output:
         Some(parent) => try!(fs::create_dir_all(&parent)),
         None => (),
     }
-    let temp = with_suffix(path, OsStr::new("~"));
     let mut stream = try!(lz4::EncoderBuilder::new()
         .level(1)
-        .build(Counter::writer(try!(File::create(&temp)))));
+        .build(Counter::writer(try!(File::create(path)))));
     try!(stream.write_all(HEADER));
     try!(write_usize(&mut stream, paths.len()));
     for path in paths.iter() {
@@ -180,18 +179,9 @@ fn write_cache(statistic: &Statistic, path: &Path, paths: &Vec<PathBuf>, output:
     match stream.finish() {
         (writer, result) => {
             statistic.add_miss(writer.len());
-            drop(writer);
-            fs::remove_file(path).ok();
-            fs::rename(&temp, path).or_else(|_| fs::remove_file(&temp)).ok();
             result
         }
     }
-}
-
-fn with_suffix(path: &Path, suffix: &OsStr) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(suffix);
-    Path::new(&name).to_path_buf()
 }
 
 fn read_cached_file<R: Read>(stream: &mut R, path: &PathBuf) -> Result<(), Error> {

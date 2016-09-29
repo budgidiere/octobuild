@@ -4,7 +4,7 @@ extern crate kernel32;
 
 use crypto::digest::Digest;
 use crypto::md5::Md5;
-use libloading::Library;
+use libloading::{Library, Symbol};
 
 use std::os::windows::ffi::OsStringExt;
 use std::os::windows::ffi::OsStrExt;
@@ -24,6 +24,13 @@ pub struct BackendTask {
     output: PathBuf,
     params: Vec<OsString>,
 }
+
+struct Suspender<'a> {
+    suspend_tracking: Symbol<'a, fn() -> winapi::HRESULT>,
+    resume_tracking: Symbol<'a, fn() -> winapi::HRESULT>,
+}
+
+struct SuspendHolder<'a>(&'a mut Suspender<'a>);
 
 #[cfg(target_pointer_width = "32")]
 pub const INVOKE_COMPILER_PASS_NAME: &'static [u8] = b"_InvokeCompilerPassW@16";
@@ -142,23 +149,32 @@ fn invoke_compiler_pass_wrapper<F>(args: Vec<OsString>, original: F) -> u32
                     return original();
                 }
             };
-            match state.cache.run_file_cached(&state.statistic,
-                                              &hash,
-                                              &vec![task.output],
-                                              || -> Result<OutputInfo, Error> {
+            let mut tracker = singleton_file_tracker()
+                .and_then(|lib| Suspender::new(lib))
+                .map_err(|e| {
+                    warn!("Can't use FileTracker object");
+                })
+                .ok();
+            let suspend_holder = tracker.as_mut().map(|mut t| t.suspend());
+            let result = match state.cache.run_file_cached(&state.statistic,
+                                                           &hash,
+                                                           &vec![task.output],
+                                                           || -> Result<OutputInfo, Error> {
                 Ok(OutputInfo {
                     status: Some(original() as i32),
                     stdout: Vec::new(),
                     stderr: Vec::new(),
                 })
             },
-                                              || true) {
+                                                           || true) {
                 Ok(output) => output.status.unwrap() as u32,
                 Err(e) => {
                     warn!("Can't run original backend with cache: {}", e);
                     0xFE
                 }
-            }
+            };
+            drop(suspend_holder);
+            result
         }
         Err(e) => {
             info!("Can't use octobuild for task: {}", e);
@@ -262,6 +278,20 @@ fn singleton_c2() -> Result<&'static Library, Error> {
                                         format!("Can't load shared library: {:?}", path())))
 }
 
+fn singleton_file_tracker() -> Result<&'static Library, Error> {
+    fn path() -> PathBuf {
+        Path::new("FileTracker.dll").to_path_buf()
+    }
+    fn create() -> Option<Library> {
+        Library::new(path()).ok()
+    }
+    lazy_static! {
+		static ref SINGLETON: Option<Library> =create() ;
+	}
+    SINGLETON.as_ref().ok_or(Error::new(ErrorKind::NotFound,
+                                        format!("Can't load shared library: {:?}", path())))
+}
+
 fn singleton_state() -> Option<&'static SharedState> {
     fn create() -> Option<SharedState> {
         let config = match Config::new() {
@@ -278,4 +308,26 @@ fn singleton_state() -> Option<&'static SharedState> {
 		static ref SINGLETON:  Option<SharedState>  = create();
 	}
     SINGLETON.as_ref()
+}
+
+impl<'a> Suspender<'a> {
+    fn new(lib: &'a Library) -> Result<Self, Error> {
+        Ok(Suspender {
+            // https://msdn.microsoft.com/en-us/library/ee904207.aspx
+            suspend_tracking: try!(unsafe { lib.get(b"SuspendTracking") }),
+            // https://msdn.microsoft.com/en-us/library/ee904206.aspx
+            resume_tracking: try!(unsafe { lib.get(b"ResumeTracking") }),
+        })
+    }
+
+    fn suspend(&'a mut self) -> SuspendHolder<'a> {
+        (self.suspend_tracking)();
+        SuspendHolder(self)
+    }
+}
+
+impl<'a> Drop for SuspendHolder<'a> {
+    fn drop(&mut self) {
+        (self.0.resume_tracking)();
+    }
 }
