@@ -10,7 +10,7 @@ else
 fi
 
 export WINEARCH=win32
-export WINEPREFIX=$WORKSPACE/target/.wine/
+export WINEPREFIX=$WORKSPACE/target/.wine-win32/
 
 rm -fR $WINEPREFIX
 mkdir -p $WINEPREFIX/dosdevices
