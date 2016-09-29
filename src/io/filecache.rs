@@ -65,6 +65,20 @@ pub struct FileCache {
     cache_limit: u64,
 }
 
+pub trait FileWrapper {
+    fn open(&self, &OpenOptions, &Path) -> Result<File, Error>;
+    fn track(&self, &Path);
+}
+
+pub struct NoFileWrapper;
+
+impl FileWrapper for NoFileWrapper {
+    fn open(&self, options: &OpenOptions, path: &Path) -> Result<File, Error> {
+        options.open(path)
+    }
+    fn track(&self, _: &Path) {}
+}
+
 struct CacheFile {
     path: PathBuf,
     size: u64,
@@ -79,23 +93,27 @@ impl FileCache {
         }
     }
 
-    pub fn run_cached<F: FnOnce() -> Result<OutputInfo, Error>, C: Fn() -> bool>(&self,
-                                                                                 statistic: &Statistic,
-                                                                                 hash: &str,
-                                                                                 outputs: &Vec<PathBuf>,
-                                                                                 worker: F,
-                                                                                 checker: C)
-                                                                                 -> Result<OutputInfo, Error> {
+    pub fn run_cached<F, C>(&self,
+                            file_wrapper: &FileWrapper,
+                            statistic: &Statistic,
+                            hash: &str,
+                            outputs: &Vec<PathBuf>,
+                            worker: F,
+                            checker: C)
+                            -> Result<OutputInfo, Error>
+        where F: FnOnce() -> Result<OutputInfo, Error>,
+              C: Fn() -> bool
+    {
         let path = self.cache_dir.join(&hash[0..2]).join(&(hash[2..].to_string() + SUFFIX));
         // Try to read data from cache.
-        match read_cache(statistic, &path, outputs) {
+        match read_cache(file_wrapper, statistic, &path, outputs) {
             Ok(output) => return Ok(output),
             Err(_) => {}
         }
         // Run task and save result to cache.
         let output = try!(worker());
         if checker() {
-            try!(write_cache(statistic, &path, outputs, &output));
+            try!(write_cache(file_wrapper, statistic, &path, outputs, &output));
         }
         Ok(output)
     }
@@ -134,9 +152,9 @@ fn find_cache_files(dir: &Path, mut files: Vec<CacheFile>) -> Result<Vec<CacheFi
     Ok(files)
 }
 
-fn write_cached_file<W: Write>(stream: &mut W, path: &PathBuf) -> Result<(), Error> {
+fn write_cached_file<W: Write>(file_wrapper: &FileWrapper, stream: &mut W, path: &PathBuf) -> Result<(), Error> {
     let mut buf: [u8; DEFAULT_BUF_SIZE] = [0; DEFAULT_BUF_SIZE];
-    let mut file = try!(File::open(path));
+    let mut file = try!(file_wrapper.open(&OpenOptions::new().read(true), path));
     let total_size = try!(file.seek(SeekFrom::End(0)));
     try!(file.seek(SeekFrom::Start(0)));
     try!(write_u64(stream, total_size));
@@ -158,7 +176,12 @@ fn write_cached_file<W: Write>(stream: &mut W, path: &PathBuf) -> Result<(), Err
     Ok(())
 }
 
-fn write_cache(statistic: &Statistic, path: &Path, paths: &Vec<PathBuf>, output: &OutputInfo) -> Result<(), Error> {
+fn write_cache(file_wrapper: &FileWrapper,
+               statistic: &Statistic,
+               path: &Path,
+               paths: &Vec<PathBuf>,
+               output: &OutputInfo)
+               -> Result<(), Error> {
     if !output.success() {
         return Ok(());
     }
@@ -168,11 +191,12 @@ fn write_cache(statistic: &Statistic, path: &Path, paths: &Vec<PathBuf>, output:
     }
     let mut stream = try!(lz4::EncoderBuilder::new()
         .level(1)
-        .build(Counter::writer(try!(File::create(path)))));
+        .build(Counter::writer(try!(file_wrapper.open(OpenOptions::new().write(true).create(true).truncate(true),
+                                                      path)))));
     try!(stream.write_all(HEADER));
     try!(write_usize(&mut stream, paths.len()));
     for path in paths.iter() {
-        try!(write_cached_file(&mut stream, path));
+        try!(write_cached_file(file_wrapper, &mut stream, path));
     }
     try!(write_output(&mut stream, output));
     try!(stream.write_all(FOOTER));
@@ -203,18 +227,22 @@ fn read_cached_file<R: Read>(stream: &mut R, path: &PathBuf) -> Result<(), Error
     Ok(())
 }
 
-fn read_cache(statistic: &Statistic, path: &Path, paths: &Vec<PathBuf>) -> Result<OutputInfo, Error> {
-    let mut file = try!(OpenOptions::new().read(true).write(true).open(Path::new(path)));
+fn read_cache(file_wrapper: &FileWrapper,
+              statistic: &Statistic,
+              cache_path: &Path,
+              paths: &Vec<PathBuf>)
+              -> Result<OutputInfo, Error> {
+    let mut file = try!(file_wrapper.open(OpenOptions::new().read(true).write(true), cache_path));
     try!(file.write(&[4]));
     try!(file.seek(SeekFrom::Start(0)));
     let mut stream = try!(lz4::Decoder::new(Counter::reader(file)));
     if try!(read_exact(&mut stream, HEADER.len())) != HEADER {
         return Err(Error::new(ErrorKind::InvalidInput,
-                              CacheError::InvalidHeader(path.to_path_buf())));
+                              CacheError::InvalidHeader(cache_path.to_path_buf())));
     }
     if try!(read_usize(&mut stream)) != paths.len() {
         return Err(Error::new(ErrorKind::InvalidInput,
-                              CacheError::PackedFilesMismatch(path.to_path_buf())));
+                              CacheError::PackedFilesMismatch(cache_path.to_path_buf())));
     }
     for path in paths.iter() {
         let mut temp_name = OsString::from("~tmp~");
@@ -222,7 +250,10 @@ fn read_cache(statistic: &Statistic, path: &Path, paths: &Vec<PathBuf>) -> Resul
         let temp = path.with_file_name(temp_name);
         drop(fs::remove_file(&path));
         match read_cached_file(&mut stream, &temp).and_then(|_| fs::rename(&temp, &path)) {
-            Ok(_) => {}
+            Ok(_) => {
+                // Add file to tracker
+                file_wrapper.track(path);
+            }
             Err(e) => {
                 drop(fs::remove_file(&temp));
                 return Err(e);
@@ -232,12 +263,12 @@ fn read_cache(statistic: &Statistic, path: &Path, paths: &Vec<PathBuf>) -> Resul
     let output = try!(read_output(&mut stream));
     if try!(read_exact(&mut stream, FOOTER.len())) != FOOTER {
         return Err(Error::new(ErrorKind::InvalidInput,
-                              CacheError::InvalidFooter(path.to_path_buf())));
+                              CacheError::InvalidFooter(cache_path.to_path_buf())));
     }
     let mut eof = [0];
     if try!(stream.read(&mut eof)) != 0 {
         return Err(Error::new(ErrorKind::InvalidInput,
-                              CacheError::InvalidFooter(path.to_path_buf())));
+                              CacheError::InvalidFooter(cache_path.to_path_buf())));
     }
     statistic.add_hit(stream.finish().0.len());
     Ok(output)

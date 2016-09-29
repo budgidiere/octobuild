@@ -16,6 +16,7 @@ use std::sync::{Arc, RwLock};
 use std::process::{Command, Output};
 
 use ::config::Config;
+use ::io::filecache::NoFileWrapper;
 use ::io::memstream::MemStream;
 use ::io::statistic::Statistic;
 use ::cache::{Cache, FileHasher};
@@ -486,7 +487,8 @@ pub trait Toolchain: Send + Sync {
         }
 
         // Try to get files from cache or run
-        state.cache.run_file_cached(&state.statistic,
+        state.cache.run_file_cached(&NoFileWrapper,
+                                    &state.statistic,
                                     &hasher.result_str(),
                                     &outputs,
                                     || -> Result<OutputInfo, Error> { self.compile_step(state, task) },

@@ -10,7 +10,7 @@ use self::filetime::FileTime;
 use super::config::Config;
 use super::compiler::OutputInfo;
 use super::io::memcache::MemCache;
-use super::io::filecache::FileCache;
+use super::io::filecache::{FileCache, FileWrapper};
 use super::io::statistic::Statistic;
 use super::utils::hash_stream;
 
@@ -39,13 +39,14 @@ impl Cache {
     }
 
     pub fn run_file_cached<F: FnOnce() -> Result<OutputInfo, Error>, C: Fn() -> bool>(&self,
+                                                                                      file_wrapper: &FileWrapper,
                                                                                       statistic: &Statistic,
                                                                                       hash: &str,
                                                                                       outputs: &Vec<PathBuf>,
                                                                                       worker: F,
                                                                                       checker: C)
                                                                                       -> Result<OutputInfo, Error> {
-        self.file_cache.run_cached(statistic, hash, outputs, worker, checker)
+        self.file_cache.run_cached(file_wrapper, statistic, hash, outputs, worker, checker)
     }
 
     pub fn cleanup(&self) -> Result<(), Error> {

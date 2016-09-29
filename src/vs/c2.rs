@@ -10,11 +10,13 @@ use std::os::windows::ffi::OsStringExt;
 use std::os::windows::ffi::OsStrExt;
 use std::env;
 use std::ffi::{OsStr, OsString};
+use std::fs::{File, OpenOptions};
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::slice;
 
 use ::cache::FileHasher;
+use ::io::filecache::FileWrapper;
 use ::config::Config;
 use ::compiler::{Hasher, OutputInfo, SharedState};
 
@@ -25,12 +27,13 @@ pub struct BackendTask {
     params: Vec<OsString>,
 }
 
-struct Suspender<'a> {
-    suspend_tracking: Symbol<'a, fn() -> winapi::HRESULT>,
-    resume_tracking: Symbol<'a, fn() -> winapi::HRESULT>,
+enum Suspender<'a> {
+    Tracker {
+        suspend: Symbol<'a, fn() -> winapi::HRESULT>,
+        resume: Symbol<'a, fn() -> winapi::HRESULT>,
+    },
+    Dummy,
 }
-
-struct SuspendHolder<'a>(&'a mut Suspender<'a>);
 
 #[cfg(target_pointer_width = "32")]
 pub const INVOKE_COMPILER_PASS_NAME: &'static [u8] = b"_InvokeCompilerPassW@16";
@@ -152,11 +155,11 @@ fn invoke_compiler_pass_wrapper<F>(args: Vec<OsString>, original: F) -> u32
             let mut tracker = singleton_file_tracker()
                 .and_then(|lib| Suspender::new(lib))
                 .map_err(|e| {
-                    warn!("Can't use FileTracker object");
+                    warn!("Can't use FileTracker object: {}", e);
                 })
-                .ok();
-            let suspend_holder = tracker.as_mut().map(|mut t| t.suspend());
-            let result = match state.cache.run_file_cached(&state.statistic,
+                .unwrap_or(Suspender::Dummy);
+            let result = match state.cache.run_file_cached(&mut tracker,
+                                                           &state.statistic,
                                                            &hash,
                                                            &vec![task.output],
                                                            || -> Result<OutputInfo, Error> {
@@ -173,7 +176,6 @@ fn invoke_compiler_pass_wrapper<F>(args: Vec<OsString>, original: F) -> u32
                     0xFE
                 }
             };
-            drop(suspend_holder);
             result
         }
         Err(e) => {
@@ -297,7 +299,7 @@ fn singleton_state() -> Option<&'static SharedState> {
         let config = match Config::new() {
             Ok(v) => v,
             Err(e) => {
-                error!("Can't create shared state: {:?}", e);
+                error!("Can't create shared state: {}", e);
                 return None;
             }
         };
@@ -312,22 +314,28 @@ fn singleton_state() -> Option<&'static SharedState> {
 
 impl<'a> Suspender<'a> {
     fn new(lib: &'a Library) -> Result<Self, Error> {
-        Ok(Suspender {
+        Ok(Suspender::Tracker {
             // https://msdn.microsoft.com/en-us/library/ee904207.aspx
-            suspend_tracking: try!(unsafe { lib.get(b"SuspendTracking") }),
+            suspend: try!(unsafe { lib.get(b"SuspendTracking") }),
             // https://msdn.microsoft.com/en-us/library/ee904206.aspx
-            resume_tracking: try!(unsafe { lib.get(b"ResumeTracking") }),
+            resume: try!(unsafe { lib.get(b"ResumeTracking") }),
         })
-    }
-
-    fn suspend(&'a mut self) -> SuspendHolder<'a> {
-        (self.suspend_tracking)();
-        SuspendHolder(self)
     }
 }
 
-impl<'a> Drop for SuspendHolder<'a> {
-    fn drop(&mut self) {
-        (self.0.resume_tracking)();
+impl<'a> FileWrapper for Suspender<'a> {
+    fn open(&self, options: &OpenOptions, path: &Path) -> Result<File, Error> {
+        match self {
+            &Suspender::Tracker { ref suspend, ref resume } => {
+                (suspend)();
+                let result = options.open(path);
+                (resume)();
+                result
+            }
+            &Suspender::Dummy => options.open(path),
+        }
+    }
+    fn track(&self, path: &Path) {
+        OpenOptions::new().append(true).open(path).ok();
     }
 }
