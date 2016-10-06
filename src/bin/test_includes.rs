@@ -1,6 +1,6 @@
 extern crate octobuild;
 
-use octobuild::filter::includes::{Include, find_includes};
+use octobuild::filter::includes::source_includes;
 
 use std::env;
 use std::fs::File;
@@ -16,12 +16,7 @@ fn main() {
                 f.read_to_end(&mut v).map(|_| v)
             })
             .unwrap();
-        let res = find_includes(&buffer).map(|(bom, v)| {
-            (bom,
-             v.into_iter()
-                .map(|v| v.map(|o| -> String { String::from_utf8(o).unwrap() }))
-                .collect::<Vec<Include<String>>>())
-        });
+        let res = source_includes(&buffer);
         println!("{:?}", res);
     }
 }

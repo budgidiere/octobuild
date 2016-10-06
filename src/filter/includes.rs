@@ -1,6 +1,8 @@
 use nom::{IResult, eof, multispace, not_line_ending, space};
+use local_encoding::{Encoder, Encoding};
 use std::fmt;
 use std::fmt::{Display, Formatter};
+use std::io::{Error, ErrorKind};
 
 #[derive(Debug)]
 #[derive(PartialEq)]
@@ -25,6 +27,12 @@ impl<T> Include<T> {
         match self {
             Include::Quote(path) => Include::Quote(f(path)),
             Include::Bracket(path) => Include::Bracket(f(path)),
+        }
+    }
+    pub fn map_or<O, E, F: Fn(T) -> Result<O, E>>(self, f: F) -> Result<Include<O>, E> {
+        match self {
+            Include::Quote(path) => f(path).map(|p| Include::Quote(p)),
+            Include::Bracket(path) => f(path).map(|p| Include::Bracket(p)),
         }
     }
 }
@@ -145,7 +153,7 @@ named!(code_line,
             ),
         || b""));
 
-named!(pub find_includes<&[u8], (bool, Vec<Include<Vec<u8>>>)>,
+named!(find_includes<&[u8], (bool, Vec<Include<Vec<u8>>>)>,
   chain!(
     bom: tag!(b"\xEF\xBB\xBF") ? ~
     lines ~
@@ -172,6 +180,27 @@ named!(pub find_includes<&[u8], (bool, Vec<Include<Vec<u8>>>)>,
     move ||{(bom.is_some(), includes)}
   )
 );
+
+pub fn source_includes(source: &[u8]) -> Result<Vec<Include<String>>, Error> {
+    let result = match find_includes(source) {
+        IResult::Incomplete(_) => {
+            Err(Error::new(ErrorKind::UnexpectedEof,
+                           "Unexpected end of stream. Can't parse source file"))
+        }
+        IResult::Error(_) => Err(Error::new(ErrorKind::InvalidData, "Can't parse source file")),
+        IResult::Done(_, (bom, includes)) => {
+            includes.into_iter()
+                .map(|v| {
+                    v.map_or(|path| match bom {
+                        true => String::from_utf8(path).map_err(|e| Error::new(ErrorKind::InvalidData, e)),
+                        false => Encoding::ANSI.to_string(&path),
+                    })
+                })
+                .collect()
+        }
+    };
+    result
+}
 
 #[test]
 fn find_includes_simple() {
