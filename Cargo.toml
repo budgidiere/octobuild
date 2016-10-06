@@ -33,6 +33,9 @@ name = "xgConsole"
 name = "filter_cl"
 
 [[bin]]
+name = "test_includes"
+
+[[bin]]
 name = "test_c2"
 
 [build-dependencies]
@@ -55,6 +58,7 @@ lazy_static = "0.2.1"
 clap = "2.11.0"
 crossbeam = "0.2.10"
 libloading = "0.3.1"
+nom = "1.2.4"
 
 byteorder = "0.5.3"
 log = "0.3.6"

@@ -18,7 +18,7 @@ enum State {
 }
 
 /**
- * Filter for removing comments from preprocessed C/C++ code.
+ * Filter for removing comments from C/C++ code.
  */
 pub struct CommentsRemover<R> {
     r: R,

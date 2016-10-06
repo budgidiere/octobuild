@@ -1,5 +1,7 @@
 include!(concat!(env!("OUT_DIR"), "/version.rs"));
 #[macro_use]
+extern crate nom;
+#[macro_use]
 extern crate log;
 #[macro_use]
 extern crate lazy_static;
@@ -73,6 +75,7 @@ pub mod cmd {
 }
 pub mod filter {
     pub mod comments;
+    pub mod includes;
 }
 pub mod simple;
 pub mod worker;
