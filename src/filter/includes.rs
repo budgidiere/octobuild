@@ -1,4 +1,4 @@
-use nom::{IResult, eof, multispace, not_line_ending, space};
+use nom::{IResult, multispace, not_line_ending, space};
 use local_encoding::{Encoder, Encoding};
 use std::fmt;
 use std::fmt::{Display, Formatter};
@@ -37,18 +37,18 @@ impl<T> Include<T> {
     }
 }
 
-named!(eol, alt!(tag!(b"\n") | tag!(b"\r\n")));
+named!(eol, alt!(tag!(&b"\n"[..]) | tag!(&b"\r\n"[..])));
 
 named!(comment_one_line,
        chain!(
-           tag!(b"//") ~
+           tag!(&b"//"[..]) ~
            not_line_ending? ,
            || {b""} ));
 
 named!(comment_block,
        chain!(
-           tag!(b"/*") ~
-           take_until_and_consume!(b"*/"),
+           tag!(&b"/*"[..]) ~
+           take_until_and_consume!(&b"*/"[..]),
            || {b""} ));
 
 named!(blanks,
@@ -60,40 +60,43 @@ named!(lines,
               || b""));
 
 named!(include_bracket<&[u8], Include<Vec<u8>>>,
-        chain!(tag!(b"<") ~
+        chain!(tag!(&b"<"[..]) ~
             include: take_until_either!("\r\n>")  ~
-            tag!(b">"),
+            tag!(&b">"[..]),
             || Include::Bracket(include.to_vec())));
 
 named!(include_quote<&[u8], Include<Vec<u8>>>,
-        chain!(tag!(b"\"") ~
+        chain!(tag!(&b"\""[..]) ~
             include: take_until_either!("\r\n\"") ~
-            tag!(b"\""),
+            tag!(&b"\""[..]),
             || Include::Quote(include.to_vec())));
 
 named!(include<&[u8], Include<Vec<u8>> >,
-       chain!(
-           tag!(b"include") ~
-           blanks? ~
-           include: alt!(include_quote | include_bracket) ~
-           blanks ? ~
-           alt!(eol|eof),
+        chain!(
+            tag!(&b"include"[..]) ~
+            blanks? ~
+            include: alt!(include_quote | include_bracket) ~
+            blanks ? ~
+            alt!(eof!()|eol),
            || include));
 
 named!(unknown_directive,
-        fold_many0!(
-            chain!(
-                is_not_code_special ~
-                alt!(eof | code_double_quote | comment_one_line | comment_block | tag!(b"/")),
-                || b""
+        chain!(
+            not!(tag!(&b"include"[..])) ~
+            fold_many0!(
+                chain!(
+                    take_till!(is_code_special) ~
+                    alt!(eof!() | code_double_quote | comment_one_line | comment_block | tag!(&b"/"[..])),
+                    || b""
+                ),
+                &b""[..],
+                |acc, _| acc
             ),
-            &b""[..],
-            |acc, _| acc
-        ));
+        || b""));
 
 named!(directive<&[u8], Option<Include<Vec<u8>>> >,
         chain!(
-            tag!(b"#") ~
+            tag!(&b"#"[..]) ~
             blanks? ~
             include: alt!(
                 map!(
@@ -107,20 +110,15 @@ named!(directive<&[u8], Option<Include<Vec<u8>>> >,
             ),
             || include ));
 
-fn is_not_code_special(input: &[u8]) -> IResult<&[u8], &[u8]> {
-    for (idx, item) in input.iter().enumerate() {
-        for &i in b"\r\n\"/".iter() {
-            if *item == i {
-                return IResult::Done(&input[idx..], &input[0..idx]);
-            }
-        }
+fn is_code_special(c: u8) -> bool {
+    match c {
+        b'\r' | b'\n' | b'\"' | b'/' => true,
+        _ => false,
     }
-    IResult::Done(&input[input.len()..], input)
 }
 
-
-fn is_quote_special(c: &u8) -> bool {
-    match *c {
+fn is_quote_special(c: u8) -> bool {
+    match c {
         b'\r' | b'\n' | b'\"' | b'\\' => true,
         _ => false,
     }
@@ -128,26 +126,27 @@ fn is_quote_special(c: &u8) -> bool {
 
 named!(code_double_quote,
         chain!(
-            tag!(b"\"") ~
+            tag!(&b"\""[..]) ~
             take_till!(is_quote_special) ~
             many0!(
                 chain!(
-                    tag!("\\") ~
+                    tag!(&"\\"[..]) ~
                     take!(1) ~
                     take_till!(is_quote_special),
                     || {b""}
                 )
             ) ~
-            tag!(b"\""),
+            tag!(&b"\""[..]),
         || b""));
 
 named!(code_line,
         chain!(
-            is_not_code_special ~
+            not!(char!(b'#')) ~
+            take_till!(is_code_special) ~
             many0!(
                 chain!(
-                    alt!(code_double_quote | comment_one_line | comment_block | tag!(b"/")) ~
-                    is_not_code_special,
+                    alt!(code_double_quote | comment_one_line | comment_block | tag!(&b"/"[..])) ~
+                    take_till!(is_code_special),
                     || b""
                 )
             ),
@@ -155,7 +154,7 @@ named!(code_line,
 
 named!(find_includes<&[u8], (bool, Vec<Include<Vec<u8>>>)>,
   chain!(
-    bom: tag!(b"\xEF\xBB\xBF") ? ~
+    bom: tag!(&b"\xEF\xBB\xBF"[..]) ? ~
     lines ~
     includes: fold_many0!(
         chain!(
@@ -177,7 +176,8 @@ named!(find_includes<&[u8], (bool, Vec<Include<Vec<u8>>>)>,
             }
         }
     ) ~
-    move ||{(bom.is_some(), includes)}
+    eof!() ~
+    move || {(bom.is_some(), includes)}
   )
 );
 
@@ -256,4 +256,26 @@ int main()
         Include::Bracket ( b"cstdlib".to_vec()),
         Include::Quote ( b"stdio.h".to_vec())
     ))));
+}
+
+#[test]
+fn find_includes_cry1_test() {
+    let r = find_includes(br#"////////////////////////////////////////////////////////////////////////////
+#include DEVIRTUALIZE_HEADER_FIX(ITacticalPointSystem.h)
+
+#ifndef __ITacticalPointSystem_h__
+#define __ITacticalPointSystem_h__
+#pragma once"#);
+    println!("{:?}", r);
+    assert!(!r.is_done());
+}
+
+#[test]
+fn find_includes_cry2_test() {
+    assert_eq!( find_includes(br#"////////////////////////////////////////////////////////////////////////////
+#include "ITacticalPointSystem.h"
+
+#ifndef __ITacticalPointSystem_h__
+#define __ITacticalPointSystem_h__
+#pragma once"#),IResult::Done(&b""[..], (false, vec!(        Include::Quote ( b"ITacticalPointSystem.h".to_vec())    ))));
 }
