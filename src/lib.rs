@@ -41,6 +41,9 @@ pub mod cluster {
 }
 pub mod compiler;
 pub mod config;
+pub mod direct {
+    pub mod scanner;
+}
 pub mod hostname;
 pub mod lazy;
 pub mod utils;
