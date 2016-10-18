@@ -4,14 +4,13 @@ use crypto::md5::Md5;
 use fern;
 use time;
 use std::env;
-use std::iter::FromIterator;
 use std::io;
 use std::io::{Error, Read};
 
 pub const DEFAULT_BUF_SIZE: usize = 1024 * 64;
 
 pub fn filter<T, R, F: Fn(&T) -> Option<R>>(args: &Vec<T>, filter: F) -> Vec<R> {
-    Vec::from_iter(args.iter().filter_map(filter))
+    args.iter().filter_map(filter).collect()
 }
 
 pub fn hash_stream<R: Read>(reader: &mut R) -> Result<String, Error> {

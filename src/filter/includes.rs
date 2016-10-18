@@ -131,7 +131,7 @@ named!(code_double_quote,
             many0!(
                 chain!(
                     tag!(&"\\"[..]) ~
-                    take!(1) ~
+                    alt!(eol | take!(1)) ~
                     take_till!(is_quote_special),
                     || {b""}
                 )
@@ -187,7 +187,10 @@ pub fn source_includes(source: &[u8]) -> Result<Vec<Include<String>>, Error> {
             Err(Error::new(ErrorKind::UnexpectedEof,
                            "Unexpected end of stream. Can't parse source file"))
         }
-        IResult::Error(_) => Err(Error::new(ErrorKind::InvalidData, "Can't parse source file")),
+        IResult::Error(e) => {
+            warn!("Can't parse source file: {}", e);
+            Err(Error::new(ErrorKind::InvalidData, "Can't parse source file"))
+        },
         IResult::Done(_, (bom, includes)) => {
             includes.into_iter()
                 .map(|v| {

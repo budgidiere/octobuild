@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::{Error, ErrorKind, Read};
 use std::iter;
 use std::rc::Rc;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use ::filter::includes::{Include, source_includes};
 
@@ -43,11 +43,14 @@ pub enum IncludeBehaviour {
     VisualStudio,
 }
 
-pub fn collect_includes<T: IncludeState>(state: &mut T,
-                                         source_file: &Path,
-                                         include_dir: &[&Path],
-                                         combine: &IncludeCombine)
-                                         -> Result<HashSet<PathBuf>, Error> {
+pub fn collect_includes<T, I>(state: &mut T,
+                              source_file: &Path,
+                              include_dir: &[I],
+                              combine: &IncludeCombine)
+                              -> Result<HashSet<PathBuf>, Error>
+    where T: IncludeState,
+          I: AsRef<Path>
+{
     let mut queue: Vec<(CollectTask, Rc<IncludeInfo>)> = Vec::new();
     let mut result: HashSet<CollectTask> = HashSet::new();
 
@@ -132,7 +135,7 @@ impl<T: IncludeState> IncludeCacher<T> {
 
 impl IncludeState for IncludeReader {
     fn file_includes(&mut self, source_file: &Path) -> Result<Option<Rc<IncludeInfo>>, Error> {
-        let canonical_path = match Path::new(source_file).canonicalize() {
+        let canonical_path = match normalize_path(source_file) {
             Ok(v) => v,
             Err(e) => {
                 return match e.kind() {
@@ -150,7 +153,7 @@ impl IncludeState for IncludeReader {
                 }
             }
         };
-        println!("> LOAD: {:?}", source_file);
+        println!("> LOAD: {:?}", canonical_path);
         let mut buffer = Vec::new();
         try!(file.read_to_end(&mut buffer));
         source_includes(&buffer).map(|v| {
@@ -164,18 +167,50 @@ impl IncludeState for IncludeReader {
 
 impl<T: IncludeState> IncludeState for IncludeCacher<T> {
     fn file_includes(&mut self, source_file: &Path) -> Result<Option<Rc<IncludeInfo>>, Error> {
-        match self.cache.entry(source_file.to_path_buf()) {
+        let path = try!(normalize_path(source_file));
+        match self.cache.entry(path) {
             Entry::Occupied(entry) => Ok(entry.get().clone()),
-            Entry::Vacant(entry) => self.state.file_includes(source_file).map(|e| entry.insert(e).clone()),
+            Entry::Vacant(entry) => self.state.file_includes(entry.key()).map(|e| entry.insert(e).clone()),
         }
     }
 }
 
-fn file_include_paths<T: IncludeState>(state: &mut T,
-                                       info: &IncludeInfo,
-                                       context_dir: &[PathBuf],
-                                       include_dir: &[&Path])
-                                       -> Result<Vec<Rc<IncludeInfo>>, Error> {
+fn normalize_path(path: &Path) -> Result<PathBuf, Error> {
+    let mut result = PathBuf::new();
+    let mut components = Vec::new();
+    for iter in path.components() {
+        match iter {
+            Component::RootDir => {
+                result = result.join(Path::new(Component::RootDir.as_os_str()));
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if components.pop().is_none() {
+                    return Err(Error::new(ErrorKind::Other, format!("Invalid input path: {:?}", path)));
+                }
+            }
+            Component::Normal(p) => {
+                components.push(p.to_os_string());
+            }
+            Component::Prefix(p) => {
+                result = Path::new(p.as_os_str()).to_path_buf();
+            }
+        }
+    }
+    for iter in components.iter() {
+        result = result.join(Path::new(iter));
+    }
+    Ok(result)
+}
+
+fn file_include_paths<T, I>(state: &mut T,
+                            info: &IncludeInfo,
+                            context_dir: &[PathBuf],
+                            include_dir: &[I])
+                            -> Result<Vec<Rc<IncludeInfo>>, Error>
+    where T: IncludeState,
+          I: AsRef<Path>
+{
     info.includes
         .iter()
         .filter_map(|include| {
@@ -186,10 +221,12 @@ fn file_include_paths<T: IncludeState>(state: &mut T,
                                        context_dir.iter()
                                            .rev()
                                            .map(|p| p.as_path())
-                                           .chain(include_dir.iter().map(|p| *p)))
+                                           .chain(include_dir.iter().map(|p| p.as_ref())))
                 }
                 &Include::Bracket(ref name) => {
-                    solve_include_path(state, Path::new(name), include_dir.iter().map(|p| *p))
+                    solve_include_path(state,
+                                       Path::new(name),
+                                       include_dir.iter().map(|p| p.as_ref()))
                 }
             };
             match result {
@@ -200,10 +237,13 @@ fn file_include_paths<T: IncludeState>(state: &mut T,
         .collect()
 }
 
-fn solve_include_path<'a, T: IncludeState, I: Iterator<Item = &'a Path>>(state: &mut T,
-                                                                         include_path: &Path,
-                                                                         dir_iter: I)
-                                                                         -> Result<Option<Rc<IncludeInfo>>, Error> {
+fn solve_include_path<'a, T, I>(state: &mut T,
+                                include_path: &Path,
+                                dir_iter: I)
+                                -> Result<Option<Rc<IncludeInfo>>, Error>
+    where T: IncludeState,
+          I: Iterator<Item = &'a Path>
+{
     if include_path.is_absolute() {
         return state.file_includes(include_path);
     }
