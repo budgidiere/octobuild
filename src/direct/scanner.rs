@@ -2,10 +2,11 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::File;
+use std::ffi::{OsStr, OsString};
 use std::io::{Error, ErrorKind, Read};
 use std::iter;
 use std::rc::Rc;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, MAIN_SEPARATOR, Path, PathBuf};
 
 use ::filter::includes::{Include, source_includes};
 
@@ -176,12 +177,12 @@ impl<T: IncludeState> IncludeState for IncludeCacher<T> {
 }
 
 fn normalize_path(path: &Path) -> Result<PathBuf, Error> {
-    let mut result = PathBuf::new();
+    let mut result = OsString::with_capacity(path.as_os_str().len());
     let mut components = Vec::new();
     for iter in path.components() {
         match iter {
             Component::RootDir => {
-                result = result.join(Path::new(Component::RootDir.as_os_str()));
+                result.push(Component::RootDir.as_os_str());
             }
             Component::CurDir => {}
             Component::ParentDir => {
@@ -190,17 +191,23 @@ fn normalize_path(path: &Path) -> Result<PathBuf, Error> {
                 }
             }
             Component::Normal(p) => {
-                components.push(p.to_os_string());
+                components.push(p);
             }
             Component::Prefix(p) => {
-                result = Path::new(p.as_os_str()).to_path_buf();
+                result.push(p.as_os_str());
             }
         }
     }
+    let mut separator = false;
     for iter in components.iter() {
-        result = result.join(Path::new(iter));
+        if separator {
+            result.push(OsStr::new(&MAIN_SEPARATOR.to_string()));
+        } else {
+            separator = true;
+        }
+        result.push(iter);
     }
-    Ok(result)
+    Ok(Path::new(&result).to_path_buf())
 }
 
 fn file_include_paths<T, I>(state: &mut T,

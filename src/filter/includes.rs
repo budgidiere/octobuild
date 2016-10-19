@@ -190,7 +190,7 @@ pub fn source_includes(source: &[u8]) -> Result<Vec<Include<String>>, Error> {
         IResult::Error(e) => {
             warn!("Can't parse source file: {}", e);
             Err(Error::new(ErrorKind::InvalidData, "Can't parse source file"))
-        },
+        }
         IResult::Done(_, (bom, includes)) => {
             includes.into_iter()
                 .map(|v| {
